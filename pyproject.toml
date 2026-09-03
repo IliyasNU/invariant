@@ -3,7 +3,20 @@ name = "invariant"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "alembic>=1.16.5",
     "fastapi[standard]>=0.141.1",
     "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.15.0",
     "sqlalchemy>=2.0.52",
 ]
+
+[dependency-groups]
+dev = [
+    "httpx2>=0.1.0",
+    "pytest>=8.4.2",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["."]
+testpaths = ["tests"]
