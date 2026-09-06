@@ -5,14 +5,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.analysis import SourceSyntaxError, analyze_sources
+from app.analysis_service import load_analysis_run, persist_analysis
 from app.database import get_db
-from app.models import Project, Rule
+from app.models import AnalysisRun, Project, Rule
 from app.schemas import (
     AnalysisRequest,
-    AnalysisResponse,
+    AnalysisRunResponse,
+    AnalysisRunSummaryResponse,
     ProjectCreate,
     ProjectResponse,
+    ProjectUpdate,
     RuleCreate,
     RuleResponse,
 )
@@ -39,7 +41,8 @@ def create_project(payload: ProjectCreate, db: DatabaseSession) -> Project:
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(
-            status_code=409, detail="A project with this name already exists"
+            status_code=409,
+            detail="A project with this name or GitHub repository already exists",
         ) from exc
     db.refresh(project)
     return project
@@ -53,6 +56,25 @@ def list_projects(db: DatabaseSession) -> list[Project]:
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
 def get_project(project_id: int, db: DatabaseSession) -> Project:
     return _project_or_404(project_id, db)
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id: int, payload: ProjectUpdate, db: DatabaseSession
+) -> Project:
+    project = _project_or_404(project_id, db)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(project, field, value)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="A project already uses this GitHub repository",
+        ) from exc
+    db.refresh(project)
+    return project
 
 
 @router.post(
@@ -83,31 +105,31 @@ def list_rules(project_id: int, db: DatabaseSession) -> list[Rule]:
     return list(db.scalars(statement))
 
 
-@router.post("/projects/{project_id}/analyze", response_model=AnalysisResponse)
+@router.post("/projects/{project_id}/analyze", response_model=AnalysisRunResponse)
 def analyze_project(
     project_id: int, payload: AnalysisRequest, db: DatabaseSession
-) -> AnalysisResponse:
+) -> AnalysisRun:
+    project = _project_or_404(project_id, db)
+    return persist_analysis(db, project, payload.files, source="direct")
+
+
+@router.get(
+    "/projects/{project_id}/analysis-runs",
+    response_model=list[AnalysisRunSummaryResponse],
+)
+def list_analysis_runs(project_id: int, db: DatabaseSession) -> list[AnalysisRun]:
     _project_or_404(project_id, db)
-    statement = select(Rule).where(Rule.project_id == project_id).order_by(Rule.id)
-    rules = list(db.scalars(statement))
-
-    try:
-        violations = analyze_sources(payload.files, rules)
-    except SourceSyntaxError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "invalid_python",
-                "path": exc.path,
-                "line": exc.line,
-                "column": exc.column,
-                "message": exc.message,
-            },
-        ) from exc
-
-    return AnalysisResponse(
-        project_id=project_id,
-        files_analyzed=len(payload.files),
-        rules_evaluated=len(rules),
-        violations=violations,
+    statement = (
+        select(AnalysisRun)
+        .where(AnalysisRun.project_id == project_id)
+        .order_by(AnalysisRun.id.desc())
     )
+    return list(db.scalars(statement))
+
+
+@router.get("/analysis-runs/{analysis_run_id}", response_model=AnalysisRunResponse)
+def get_analysis_run(analysis_run_id: int, db: DatabaseSession) -> AnalysisRun:
+    run = load_analysis_run(db, analysis_run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Analysis run not found")
+    return run

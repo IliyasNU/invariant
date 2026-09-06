@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     postgres_password: str = "invariant"
     postgres_host: str = "localhost"
     postgres_port: int = Field(default=5433, ge=1, le=65535)
+    github_token: str | None = None
+    github_webhook_secret: str | None = None
+    github_post_pr_comment: bool = False
+    github_api_url: str = "https://api.github.com"
 
 
 def get_database_url() -> str:

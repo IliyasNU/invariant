@@ -6,6 +6,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 MODULE_NAME = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_.*?\[\]-]+$")
+GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _normalize_github_name(value: str | None) -> str | None:
+    if value is not None and not GITHUB_NAME.fullmatch(value):
+        raise ValueError("must contain only letters, numbers, '.', '_', or '-'")
+    return value.lower() if value is not None else None
 
 
 class APIModel(BaseModel):
@@ -15,6 +22,40 @@ class APIModel(BaseModel):
 class ProjectCreate(APIModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
+    github_owner: str | None = Field(default=None, min_length=1, max_length=100)
+    github_repo: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("github_owner", "github_repo")
+    @classmethod
+    def normalize_github_name(cls, value: str | None) -> str | None:
+        return _normalize_github_name(value)
+
+    @model_validator(mode="after")
+    def github_fields_are_paired(self) -> ProjectCreate:
+        if (self.github_owner is None) != (self.github_repo is None):
+            raise ValueError("github_owner and github_repo must be provided together")
+        return self
+
+
+class ProjectUpdate(APIModel):
+    description: str | None = Field(default=None, max_length=1000)
+    github_owner: str | None = Field(default=None, min_length=1, max_length=100)
+    github_repo: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("github_owner", "github_repo")
+    @classmethod
+    def normalize_github_name(cls, value: str | None) -> str | None:
+        return _normalize_github_name(value)
+
+    @model_validator(mode="after")
+    def github_fields_are_updated_together(self) -> ProjectUpdate:
+        github_fields = {"github_owner", "github_repo"}
+        supplied = self.model_fields_set & github_fields
+        if supplied and supplied != github_fields:
+            raise ValueError("github_owner and github_repo must be updated together")
+        if supplied and ((self.github_owner is None) != (self.github_repo is None)):
+            raise ValueError("github_owner and github_repo must both be set or cleared")
+        return self
 
 
 class ProjectResponse(APIModel):
@@ -23,6 +64,8 @@ class ProjectResponse(APIModel):
     id: int
     name: str
     description: str | None
+    github_owner: str | None
+    github_repo: str | None
     created_at: datetime
 
 
@@ -97,8 +140,43 @@ class ViolationResponse(APIModel):
     message: str
 
 
-class AnalysisResponse(APIModel):
+class AnalysisRunSummaryResponse(APIModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
     project_id: int
+    source: str
+    status: str
+    passed: bool
+    pull_number: int | None
+    repository_owner: str | None
+    repository_name: str | None
     files_analyzed: int
     rules_evaluated: int
-    violations: list[ViolationResponse]
+    violation_count: int
+    created_at: datetime
+
+
+class PersistedViolationResponse(ViolationResponse):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    analysis_run_id: int
+    rule_id: int | None
+    line: int | None
+    column: int | None
+    imported_module: str | None
+
+
+class AnalysisRunResponse(AnalysisRunSummaryResponse):
+    violations: list[PersistedViolationResponse]
+
+
+class GitHubAnalysisRequest(APIModel):
+    pull_number: int = Field(ge=1)
+
+
+class WebhookResponse(APIModel):
+    status: Literal["ignored", "analyzed", "duplicate"]
+    analysis_run_id: int | None = None
+    detail: str | None = None

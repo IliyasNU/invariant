@@ -6,7 +6,7 @@ from app.models import Rule
 from app.schemas import SourceFile, ViolationResponse
 
 
-@dataclass(frozen=True)
+@dataclass
 class SourceSyntaxError(Exception):
     path: str
     line: int | None
@@ -34,7 +34,7 @@ def _imports(tree: ast.AST) -> list[tuple[str, int, int]]:
     return imported
 
 
-def analyze_sources(
+def analyze_files(
     files: list[SourceFile], rules: list[Rule]
 ) -> list[ViolationResponse]:
     violations: list[ViolationResponse] = []

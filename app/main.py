@@ -1,16 +1,71 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.analysis import SourceSyntaxError
+from app.analysis_service import ProjectGitHubNotConfigured
 from app.api import router
 from app.database import engine
+from app.github import GitHubAPIError
+from app.github_api import router as github_router
 
 app = FastAPI(
     title="Invariant",
-    version="0.1.0",
-    description="Store project architecture rules and check Python changes.",
+    version="0.2.0",
+    description="Store architecture rules and analyze Python changes or GitHub PRs.",
 )
 app.include_router(router)
+app.include_router(github_router)
+
+
+@app.exception_handler(SourceSyntaxError)
+def source_syntax_error_handler(
+    _request: Request, exc: SourceSyntaxError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "code": "invalid_python",
+                "path": exc.path,
+                "line": exc.line,
+                "column": exc.column,
+                "message": exc.message,
+            }
+        },
+    )
+
+
+@app.exception_handler(GitHubAPIError)
+def github_api_error_handler(_request: Request, exc: GitHubAPIError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": {"code": exc.code, "message": exc.message}},
+    )
+
+
+@app.exception_handler(ProjectGitHubNotConfigured)
+def github_not_configured_handler(
+    _request: Request, _exc: ProjectGitHubNotConfigured
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": {
+                "code": "github_not_configured",
+                "message": "Project has no GitHub owner/repository configuration",
+            }
+        },
+    )
+
+
+@app.exception_handler(SQLAlchemyError)
+def database_error_handler(_request: Request, _exc: SQLAlchemyError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database unavailable"},
+    )
 
 
 @app.get("/health")
