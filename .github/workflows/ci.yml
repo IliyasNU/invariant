@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --dev
+      - run: uv run ruff check app migrations tests
+      - run: uv run ruff format --check app migrations tests
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: invariant
+          POSTGRES_USER: invariant
+          POSTGRES_PASSWORD: invariant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U invariant -d invariant"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql+psycopg://invariant:invariant@localhost:5432/invariant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --dev
+      - name: Migrations apply, match the models, and roll back
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+          uv run alembic downgrade base
+      - name: Tests on SQLite
+        run: uv run pytest
+      - name: Tests on PostgreSQL
+        run: uv run pytest
+        env:
+          INVARIANT_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}

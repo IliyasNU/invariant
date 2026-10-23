@@ -1,14 +1,44 @@
 services:
+  app:
+    build: .
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-invariant}
+      POSTGRES_USER: ${POSTGRES_USER:-invariant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invariant}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_POST_PR_COMMENT: ${GITHUB_POST_PR_COMMENT:-false}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+    ports:
+      # Loopback only: the API has no authentication yet.
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        uv run --no-sync alembic upgrade head &&
+        exec uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port 8000
+
   db:
     image: postgres:18
     environment:
-      POSTGRES_DB: invariant
-      POSTGRES_USER: invariant
-      POSTGRES_PASSWORD: invariant
+      POSTGRES_DB: ${POSTGRES_DB:-invariant}
+      POSTGRES_USER: ${POSTGRES_USER:-invariant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invariant}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
 
 volumes:
   postgres_data:
