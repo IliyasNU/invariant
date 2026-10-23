@@ -32,12 +32,23 @@ RULE_KEY = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 Severity = Literal["error", "warning"]
-RULE_TYPES = ("forbidden_import", "no_relative_import", "max_file_lines")
+RULE_TYPES = (
+    "forbidden_import",
+    "forbidden_call",
+    "no_relative_import",
+    "max_file_lines",
+)
 
 
 def _module_name(value: str) -> str:
     if not MODULE_NAME.fullmatch(value):
         raise ValueError("must be a dotted Python module name such as 'app.db'")
+    return value
+
+
+def _call_name(value: str) -> str:
+    if not MODULE_NAME.fullmatch(value):
+        raise ValueError("must be a dotted name such as 'os.system' or 'builtins.eval'")
     return value
 
 
@@ -85,6 +96,7 @@ def _display_name(value: str) -> str:
 
 
 ModuleName = Annotated[str, AfterValidator(_module_name)]
+CallName = Annotated[str, AfterValidator(_call_name)]
 ModuleGlob = Annotated[str, Field(max_length=255), AfterValidator(_module_glob)]
 PathGlob = Annotated[str, Field(max_length=500), AfterValidator(_path_glob)]
 SourceRoot = Annotated[str, Field(max_length=500), AfterValidator(_source_root)]
@@ -132,6 +144,24 @@ class ForbiddenImportRule(_RuleBase):
         return value
 
 
+class ForbiddenCallRule(_RuleBase):
+    """Modules matching ``source_pattern`` must not call these functions.
+
+    An entry also covers everything inside it: ``subprocess`` forbids
+    ``subprocess.run`` and ``subprocess.Popen``.
+    """
+
+    rule_type: Literal["forbidden_call"]
+    forbidden_calls: list[CallName] = Field(min_length=1, max_length=100)
+
+    @field_validator("forbidden_calls")
+    @classmethod
+    def unique_calls(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("entries must be unique")
+        return value
+
+
 class NoRelativeImportRule(_RuleBase):
     """Modules matching ``source_pattern`` must use absolute imports only."""
 
@@ -146,7 +176,7 @@ class MaxFileLinesRule(_RuleBase):
 
 
 RuleConfig = Annotated[
-    ForbiddenImportRule | NoRelativeImportRule | MaxFileLinesRule,
+    ForbiddenImportRule | ForbiddenCallRule | NoRelativeImportRule | MaxFileLinesRule,
     Field(discriminator="rule_type"),
 ]
 RULES = TypeAdapter(RuleConfig)

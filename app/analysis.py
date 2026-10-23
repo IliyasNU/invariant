@@ -6,6 +6,7 @@ from typing import Any
 from app.models import Project, Rule
 from app.schemas import SourceFile, ViolationResponse
 from invariant.config import (
+    ForbiddenCallRule,
     ForbiddenImportRule,
     MaxFileLinesRule,
     NoRelativeImportRule,
@@ -17,6 +18,7 @@ from invariant.result import AnalysisResult
 
 _RULE_MODELS = {
     "forbidden_import": ForbiddenImportRule,
+    "forbidden_call": ForbiddenCallRule,
     "no_relative_import": NoRelativeImportRule,
     "max_file_lines": MaxFileLinesRule,
 }

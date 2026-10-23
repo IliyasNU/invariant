@@ -89,6 +89,33 @@ def test_export_is_a_toml_file_that_reimports_without_changes(client):
     assert again["unchanged"] == ["domain-isolation", "absolute"]
 
 
+def test_forbidden_call_rules_round_trip_through_the_file(client):
+    project = create_project(client)
+    content = (
+        'version = 1\n[[rules]]\nkey = "no-shell"\nrule_type = "forbidden_call"\n'
+        'forbidden_calls = ["os.system", "subprocess"]\n'
+    )
+    assert import_config(client, project["id"], content).status_code == 200
+
+    exported = client.get(f"/projects/{project['id']}/config").text
+
+    [rule] = parse_config(exported).rules
+    assert (rule.rule_type, rule.forbidden_calls) == (
+        "forbidden_call",
+        ["os.system", "subprocess"],
+    )
+    assert rules(client, project["id"])[0]["forbidden_calls"] == [
+        "os.system",
+        "subprocess",
+    ]
+    again = import_config(client, project["id"], exported).json()
+    assert (again["created"], again["updated"], again["unchanged"]) == (
+        [],
+        [],
+        ["no-shell"],
+    )
+
+
 def test_dry_run_reports_changes_without_applying_them(client):
     project = create_project(client)
     before = client.get(f"/projects/{project['id']}").json()

@@ -33,6 +33,13 @@ forbidden_imports = ["app.infrastructure", "fastapi"]
 exclude_paths = ["src/app/domain/legacy/**"]
 
 [[rules]]
+key = "no-shell"
+name = "Domain code must not run commands"
+rule_type = "forbidden_call"
+source_pattern = "app.domain.*"
+forbidden_calls = ["os.system", "subprocess", "builtins.eval"]
+
+[[rules]]
 key = "absolute-imports"
 rule_type = "no_relative_import"
 severity = "warning"
@@ -78,6 +85,7 @@ Every rule has these fields:
 | `rule_type` | Extra fields | Reports |
 | --- | --- | --- |
 | `forbidden_import` | `forbidden_imports`: 1–100 module names | An import of a listed module or any of its submodules |
+| `forbidden_call` | `forbidden_calls`: 1–100 dotted names | A call of a listed function, or of anything inside a listed module |
 | `no_relative_import` | none | Any `from .x import y`, `from ..x import y` or `from . import x` |
 | `max_file_lines` | `max_lines`: a positive integer | A file with more physical lines than the limit |
 
@@ -86,6 +94,20 @@ Every rule has these fields:
 against the file's package. `app.infrastructure` matches itself and
 `app.infrastructure.db`, but not `app.infrastructure_extra`. A `from` import
 whose module is itself forbidden is reported once per statement.
+
+`forbidden_call` reports a call when the name it is made through can be traced
+to an import or a builtin. `import os as operating; operating.system()` and
+`from os import system as sh; sh()` both call `os.system`, `eval()` calls
+`builtins.eval`, and a decorator used without parentheses (`@functools.cache`)
+calls `functools.cache`. As with imports, an entry covers everything inside
+it: `subprocess` forbids `subprocess.run` and `subprocess.Popen`, but not
+`subprocessx.run`. Names are looked up with Python's scoping rules, so a
+parameter, assignment, loop or `with` target, `except ... as` name, class
+attribute, type parameter, `global` or `nonlocal` rebinding that shadows an
+import leaves the call unresolved, and an unresolved call is never reported.
+So does a name bound to different modules on different paths
+(`try: import ujson as json` / `except ImportError: import json`) and any name
+a `from x import *` could have provided.
 
 `max_file_lines` counts lines as an editor does: an empty file has 0 lines, a
 final line break adds none, and `\n`, `\r\n` and `\r` all end a line. The
@@ -164,6 +186,10 @@ the code it checks. That also bounds what it can know:
   is not followed.
 - A relative import that climbs above the top-level package cannot be
   resolved and is not reported by `forbidden_import`.
+- `forbidden_call` follows only the name a call is made through: a function
+  stored in a variable first (`run = os.system`), passed as a value
+  (`map(os.system, commands)`), looked up with `getattr`, or reached through
+  an object (`self.shell.run()`) is not traced back to its definition.
 
-An unresolved case is never reported as proven safe: such imports are simply
-outside what a rule can match.
+An unresolved case is never reported as proven safe: such imports and calls
+are simply outside what a rule can match.
