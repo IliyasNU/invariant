@@ -1,10 +1,11 @@
 import logging
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.analysis import analyze_files
-from app.github import GitHubAPIError, GitHubClient
+from app.github import GitHubAPIError, GitHubClient, SkippedFile
 from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import SourceFile
 
@@ -13,6 +14,21 @@ logger = logging.getLogger(__name__)
 
 class ProjectGitHubNotConfigured(Exception):
     pass
+
+
+@dataclass
+class AnalysisIncomplete(Exception):
+    """Some changed Python files could not be analyzed, so there is no verdict."""
+
+    skipped: list[SkippedFile]
+    truncated: bool
+
+
+@dataclass
+class AnalysisNotApplicable(Exception):
+    """The pull request changes no Python files, so there is nothing to verify."""
+
+    ignored: int
 
 
 def persist_analysis(
@@ -74,16 +90,19 @@ def analyze_github_pull_request(
     pull_request = github.get_pull_request(
         project.github_owner, project.github_repo, pull_number
     )
-    files = github.get_changed_python_files(
-        project.github_owner,
-        project.github_repo,
-        pull_request.number,
-        pull_request.head_sha,
+    changed = github.get_changed_python_files(
+        project.github_owner, project.github_repo, pull_request
     )
+    # A run can only pass or fail, so an analysis that could not see every changed
+    # Python file is refused rather than recorded (and announced) as a pass.
+    if not changed.complete:
+        raise AnalysisIncomplete(skipped=changed.skipped, truncated=changed.truncated)
+    if not changed.files:
+        raise AnalysisNotApplicable(ignored=changed.ignored)
     run = persist_analysis(
         db,
         project,
-        files,
+        changed.files,
         source=source,
         pull_number=pull_request.number,
         github_delivery_id=github_delivery_id,

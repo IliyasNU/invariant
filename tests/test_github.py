@@ -7,9 +7,12 @@ import pytest
 
 from app.config import Settings
 from app.github import (
+    MAX_GITHUB_FILE_BYTES,
+    ChangedPythonFiles,
     GitHubAPIError,
     GitHubClient,
     PullRequestMetadata,
+    SkippedFile,
     get_github_client,
     verify_webhook_signature,
 )
@@ -32,6 +35,9 @@ class FakeGitHubClient:
                 content="from app.infrastructure.db import engine\n",
             )
         ]
+        self.skipped: list[SkippedFile] = []
+        self.truncated = False
+        self.ignored = 0
 
     def get_pull_request(
         self, owner: str, repo: str, pull_number: int
@@ -43,11 +49,17 @@ class FakeGitHubClient:
         return PullRequestMetadata(number=pull_number, head_sha="abc123")
 
     def get_changed_python_files(
-        self, owner: str, repo: str, pull_number: int, head_sha: str
-    ) -> list[SourceFile]:
-        assert (owner, repo, head_sha) == ("iliyasnu", "invariant", "abc123")
-        assert pull_number >= 1
-        return self.files
+        self, owner: str, repo: str, pull_request: PullRequestMetadata
+    ) -> ChangedPythonFiles:
+        assert (owner, repo) == ("iliyasnu", "invariant")
+        assert pull_request.head_sha == "abc123"
+        assert pull_request.number >= 1
+        return ChangedPythonFiles(
+            files=self.files,
+            skipped=self.skipped,
+            truncated=self.truncated,
+            ignored=self.ignored,
+        )
 
     def post_pull_request_comment(
         self, owner: str, repo: str, pull_number: int, body: str
@@ -184,6 +196,92 @@ def test_optional_comment_failure_does_not_fail_analysis(client, github):
     assert github.comment_calls == 1
 
 
+@pytest.mark.parametrize(
+    ("skipped", "truncated"),
+    [
+        ([SkippedFile("app/domain/big.py", "too_large")], False),
+        ([SkippedFile("app/domain/latin.py", "undecodable")], False),
+        ([SkippedFile("app\\..\\x.py", "invalid_path")], False),
+        ([], True),
+    ],
+)
+def test_incomplete_github_analysis_records_no_pass(client, github, skipped, truncated):
+    project = create_github_project(client)
+    create_rule(client, project["id"])
+    github.comment_enabled = True
+    github.files = []
+    github.skipped = skipped
+    github.truncated = truncated
+
+    response = client.post(
+        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "analysis_incomplete"
+    assert detail["skipped"] == [
+        {"path": item.path, "reason": item.reason} for item in skipped
+    ]
+    assert detail["file_list_truncated"] is truncated
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert github.comment_calls == 0
+
+
+def test_github_pr_without_python_files_is_not_applicable(client, github):
+    project = create_github_project(client)
+    create_rule(client, project["id"])
+    github.comment_enabled = True
+    github.files = []
+    github.ignored = 3
+
+    response = client.post(
+        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "not_applicable"
+    assert response.json()["detail"]["ignored_files"] == 3
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert github.comment_calls == 0
+
+
+def test_webhook_accepts_not_applicable_pull_request_without_run(
+    client, github, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    project = create_github_project(client)
+    github.comment_enabled = True
+    github.files = []
+    body = json.dumps(pull_request_payload()).encode()
+
+    response = client.post(
+        "/integrations/github/webhook", content=body, headers=signed_headers(body)
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "not_applicable"
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert github.comment_calls == 0
+
+
+def test_webhook_rejects_incomplete_analysis_without_run(client, github, monkeypatch):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    project = create_github_project(client)
+    github.comment_enabled = True
+    github.skipped = [SkippedFile("app/domain/big.py", "too_large")]
+    body = json.dumps(pull_request_payload()).encode()
+
+    response = client.post(
+        "/integrations/github/webhook", content=body, headers=signed_headers(body)
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "analysis_incomplete"
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert github.comment_calls == 0
+
+
 def test_webhook_signature_validation():
     body = b'{"action":"opened"}'
     signature = (
@@ -277,10 +375,18 @@ def test_webhook_analyzes_and_deduplicates_delivery(client, github, monkeypatch)
     assert history[0]["source"] == "github_webhook"
 
 
+def mock_github(handler) -> GitHubClient:
+    settings = Settings(_env_file=None, github_api_url="https://api.github.test")
+    return GitHubClient(settings, transport=httpx.MockTransport(handler))
+
+
 def test_github_client_fetches_only_live_python_files():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/pulls/7"):
-            return httpx.Response(200, json={"number": 7, "head": {"sha": "deadbeef"}})
+            return httpx.Response(
+                200,
+                json={"number": 7, "head": {"sha": "deadbeef"}, "changed_files": 3},
+            )
         if request.url.path.endswith("/pulls/7/files"):
             return httpx.Response(
                 200,
@@ -295,33 +401,106 @@ def test_github_client_fetches_only_live_python_files():
             return httpx.Response(200, content=b"import json\n")
         raise AssertionError(f"Unexpected request: {request.url}")
 
-    settings = Settings(_env_file=None, github_api_url="https://api.github.test")
-    with GitHubClient(settings, transport=httpx.MockTransport(handler)) as github:
+    with mock_github(handler) as github:
         pull = github.get_pull_request("owner", "repo", 7)
-        files = github.get_changed_python_files(
-            "owner", "repo", pull.number, pull.head_sha
-        )
+        changed = github.get_changed_python_files("owner", "repo", pull)
 
-    assert files == [SourceFile(path="app/service.py", content="import json\n")]
+    assert pull.changed_files == 3
+    assert changed.files == [SourceFile(path="app/service.py", content="import json\n")]
+    assert changed.ignored == 2
+    assert changed.complete
 
 
-def test_github_client_skips_files_with_invalid_paths():
+def test_github_client_reports_files_it_could_not_analyze():
+    downloaded: list[str] = []
+    contents = {
+        "app/big.py": b"import app.infrastructure\n" + b"#" * MAX_GITHUB_FILE_BYTES,
+        "app/latin.py": b"\xff\xfeimport app.infrastructure\n",
+        "app/ok.py": b"import json\n",
+    }
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/pulls/7/files"):
             return httpx.Response(
                 200,
                 json=[
                     {"filename": "app\\..\\escape.py", "status": "added"},
-                    {"filename": "app/service.py", "status": "modified"},
+                    {"filename": "app/big.py", "status": "added"},
+                    {"filename": "app/latin.py", "status": "modified"},
+                    {"filename": "app/ok.py", "status": "renamed"},
                 ],
             )
-        return httpx.Response(200, content=b"import json\n")
+        path = request.url.path.split("/contents/", 1)[1]
+        downloaded.append(path)
+        return httpx.Response(200, content=contents[path])
 
-    settings = Settings(_env_file=None, github_api_url="https://api.github.test")
-    with GitHubClient(settings, transport=httpx.MockTransport(handler)) as github:
-        files = github.get_changed_python_files("owner", "repo", 7, "deadbeef")
+    pull = PullRequestMetadata(number=7, head_sha="deadbeef", changed_files=4)
+    with mock_github(handler) as github:
+        changed = github.get_changed_python_files("owner", "repo", pull)
 
-    assert files == [SourceFile(path="app/service.py", content="import json\n")]
+    assert changed.skipped == [
+        SkippedFile("app\\..\\escape.py", "invalid_path"),
+        SkippedFile("app/big.py", "too_large"),
+        SkippedFile("app/latin.py", "undecodable"),
+    ]
+    assert changed.files == [SourceFile(path="app/ok.py", content="import json\n")]
+    assert not changed.complete
+    assert downloaded == ["app/big.py", "app/latin.py", "app/ok.py"]
+
+
+@pytest.mark.parametrize(
+    ("listed", "changed_files", "truncated"),
+    [
+        (3000, 3001, True),
+        (3000, None, True),
+        (3000, 3000, False),
+        (40, 41, True),
+        (40, None, False),
+    ],
+)
+def test_github_client_detects_truncated_file_list(listed, changed_files, truncated):
+    entries = [{"filename": f"docs/{i}.md", "status": "added"} for i in range(listed)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=entries[(page - 1) * 100 : page * 100])
+
+    pull = PullRequestMetadata(number=7, head_sha="sha", changed_files=changed_files)
+    with mock_github(handler) as github:
+        changed = github.get_changed_python_files("owner", "repo", pull)
+
+    assert changed.truncated is truncated
+    assert changed.ignored == listed
+
+
+def test_github_client_downloads_nothing_from_a_truncated_list():
+    entries = [{"filename": f"app/m{i}.py", "status": "added"} for i in range(100)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "/contents/" not in request.url.path
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=entries if page == 1 else [])
+
+    pull = PullRequestMetadata(number=7, head_sha="sha", changed_files=101)
+    with mock_github(handler) as github:
+        changed = github.get_changed_python_files("owner", "repo", pull)
+
+    assert changed.truncated
+    assert changed.files == []
+
+
+@pytest.mark.parametrize(
+    "payload", [[{"status": "added"}], [{"filename": 7}], ["app/x.py"], {}]
+)
+def test_github_client_rejects_malformed_file_lists(payload):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    pull = PullRequestMetadata(number=7, head_sha="sha")
+    with mock_github(handler) as github, pytest.raises(GitHubAPIError) as exc_info:
+        github.get_changed_python_files("owner", "repo", pull)
+
+    assert exc_info.value.code == "github_invalid_response"
 
 
 def test_github_client_maps_rate_limit_error():

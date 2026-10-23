@@ -2,7 +2,7 @@ import hashlib
 import hmac
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Any, Self
+from typing import Any, Literal, Self
 from urllib.parse import quote
 
 import httpx
@@ -13,12 +13,36 @@ from app.schemas import SourceFile
 
 MAX_GITHUB_FILE_BYTES = 1_000_000
 MAX_FILE_PAGES = 30
+FILES_PER_PAGE = 100
 
 
 @dataclass(frozen=True)
 class PullRequestMetadata:
     number: int
     head_sha: str
+    # GitHub's own count of changed files, used to detect a truncated file list.
+    changed_files: int | None = None
+
+
+@dataclass(frozen=True)
+class SkippedFile:
+    path: str
+    reason: Literal["too_large", "undecodable", "invalid_path"]
+
+
+@dataclass(frozen=True)
+class ChangedPythonFiles:
+    files: list[SourceFile]
+    # Changed Python files that could not be analyzed.
+    skipped: list[SkippedFile]
+    # GitHub listed fewer changed files than the pull request has.
+    truncated: bool
+    # Removed and non-Python files, which are outside the analysis.
+    ignored: int
+
+    @property
+    def complete(self) -> bool:
+        return not self.skipped and not self.truncated
 
 
 @dataclass
@@ -122,7 +146,8 @@ class GitHubClient:
         try:
             number = payload["number"]
             head_sha = payload["head"]["sha"]
-        except (KeyError, TypeError) as exc:
+            changed_files = payload.get("changed_files")
+        except (AttributeError, KeyError, TypeError) as exc:
             raise GitHubAPIError(
                 status_code=502,
                 code="github_invalid_response",
@@ -140,7 +165,15 @@ class GitHubClient:
                 code="github_invalid_response",
                 message="GitHub pull request metadata was invalid",
             )
-        return PullRequestMetadata(number=number, head_sha=head_sha)
+        if (
+            not isinstance(changed_files, int)
+            or isinstance(changed_files, bool)
+            or changed_files < 0
+        ):
+            changed_files = None
+        return PullRequestMetadata(
+            number=number, head_sha=head_sha, changed_files=changed_files
+        )
 
     def get_changed_files(
         self, owner: str, repo: str, pull_number: int
@@ -149,22 +182,24 @@ class GitHubClient:
         for page in range(1, MAX_FILE_PAGES + 1):
             payload = self._json(
                 f"/repos/{owner}/{repo}/pulls/{pull_number}/files",
-                params={"per_page": 100, "page": page},
+                params={"per_page": FILES_PER_PAGE, "page": page},
             )
-            if not isinstance(payload, list):
+            # A malformed entry could hide a Python file, so it fails the request.
+            if not isinstance(payload, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("filename"), str)
+                for item in payload
+            ):
                 raise GitHubAPIError(
                     status_code=502,
                     code="github_invalid_response",
                     message="GitHub changed-files response was invalid",
                 )
-            changed_files.extend(item for item in payload if isinstance(item, dict))
-            if len(payload) < 100:
+            changed_files.extend(payload)
+            if len(payload) < FILES_PER_PAGE:
                 break
         return changed_files
 
-    def get_file_content(
-        self, owner: str, repo: str, path: str, ref: str
-    ) -> str | None:
+    def get_file_bytes(self, owner: str, repo: str, path: str, ref: str) -> bytes:
         encoded_path = quote(path, safe="/")
         response = self._request(
             "GET",
@@ -172,38 +207,49 @@ class GitHubClient:
             params={"ref": ref},
             headers={"Accept": "application/vnd.github.raw+json"},
         )
-        if len(response.content) > MAX_GITHUB_FILE_BYTES:
-            return None
-        try:
-            return response.content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            return None
+        return response.content
 
     def get_changed_python_files(
-        self, owner: str, repo: str, pull_number: int, head_sha: str
-    ) -> list[SourceFile]:
-        sources: list[SourceFile] = []
-        for changed_file in self.get_changed_files(owner, repo, pull_number):
-            path = changed_file.get("filename")
-            file_status = changed_file.get("status")
-            if (
-                not isinstance(path, str)
-                or not path.endswith(".py")
-                or len(path) > 500
-                or path.startswith("/")
-                or ".." in path.split("/")
-                or file_status in {"removed", "deleted"}
+        self, owner: str, repo: str, pull_request: PullRequestMetadata
+    ) -> ChangedPythonFiles:
+        entries = self.get_changed_files(owner, repo, pull_request.number)
+        if pull_request.changed_files is not None:
+            truncated = len(entries) < pull_request.changed_files
+        else:
+            truncated = len(entries) >= MAX_FILE_PAGES * FILES_PER_PAGE
+
+        files: list[SourceFile] = []
+        skipped: list[SkippedFile] = []
+        ignored = 0
+        for entry in entries:
+            path = entry["filename"]
+            if entry.get("status") in {"removed", "deleted"} or not path.endswith(
+                ".py"
             ):
-                continue
-            content = self.get_file_content(owner, repo, path, head_sha)
-            if content is None:
+                ignored += 1
                 continue
             try:
-                sources.append(SourceFile(path=path, content=content))
+                # Validate the path before downloading anything for it.
+                SourceFile(path=path, content="")
             except ValidationError:
-                # Git allows paths the API rejects, such as pkg\..\mod.py.
+                skipped.append(SkippedFile(path, "invalid_path"))
                 continue
-        return sources
+            if truncated:
+                # The result is incomplete anyway; spare the downloads.
+                continue
+            content = self.get_file_bytes(owner, repo, path, pull_request.head_sha)
+            if len(content) > MAX_GITHUB_FILE_BYTES:
+                skipped.append(SkippedFile(path, "too_large"))
+                continue
+            try:
+                text = content.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                skipped.append(SkippedFile(path, "undecodable"))
+                continue
+            files.append(SourceFile(path=path, content=text))
+        return ChangedPythonFiles(
+            files=files, skipped=skipped, truncated=truncated, ignored=ignored
+        )
 
     def post_pull_request_comment(
         self, owner: str, repo: str, pull_number: int, body: str

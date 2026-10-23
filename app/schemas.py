@@ -190,6 +190,6 @@ class GitHubAnalysisRequest(APIModel):
 
 
 class WebhookResponse(APIModel):
-    status: Literal["ignored", "analyzed", "duplicate"]
+    status: Literal["ignored", "analyzed", "duplicate", "not_applicable"]
     analysis_run_id: int | None = None
     detail: str | None = None

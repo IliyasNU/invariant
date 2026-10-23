@@ -4,7 +4,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.analysis import SourceSyntaxError
-from app.analysis_service import ProjectGitHubNotConfigured
+from app.analysis_service import (
+    AnalysisIncomplete,
+    AnalysisNotApplicable,
+    ProjectGitHubNotConfigured,
+)
 from app.api import router
 from app.database import engine
 from app.github import GitHubAPIError
@@ -55,6 +59,44 @@ def github_not_configured_handler(
             "detail": {
                 "code": "github_not_configured",
                 "message": "Project has no GitHub owner/repository configuration",
+            }
+        },
+    )
+
+
+@app.exception_handler(AnalysisIncomplete)
+def analysis_incomplete_handler(
+    _request: Request, exc: AnalysisIncomplete
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "code": "analysis_incomplete",
+                "message": (
+                    "Some changed Python files could not be analyzed; "
+                    "no result was recorded"
+                ),
+                "skipped": [
+                    {"path": item.path, "reason": item.reason} for item in exc.skipped
+                ],
+                "file_list_truncated": exc.truncated,
+            }
+        },
+    )
+
+
+@app.exception_handler(AnalysisNotApplicable)
+def analysis_not_applicable_handler(
+    _request: Request, exc: AnalysisNotApplicable
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "code": "not_applicable",
+                "message": "The pull request changes no Python files to analyze",
+                "ignored_files": exc.ignored,
             }
         },
     )

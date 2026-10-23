@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.analysis_service import analyze_github_pull_request
+from app.analysis_service import AnalysisNotApplicable, analyze_github_pull_request
 from app.config import Settings
 from app.database import get_db
 from app.github import GitHubClient, get_github_client, verify_webhook_signature
@@ -184,6 +184,15 @@ def github_webhook(
             github,
             source="github_webhook",
             github_delivery_id=github_delivery,
+        )
+    except AnalysisNotApplicable:
+        # A docs-only pull request is a normal event, not a failed delivery.
+        response = WebhookResponse(
+            status="not_applicable",
+            detail="The pull request changes no Python files to analyze",
+        )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED, content=response.model_dump()
         )
     except IntegrityError:
         db.rollback()
