@@ -1,4 +1,3 @@
-import posixpath
 import re
 from datetime import datetime
 from typing import Annotated, Literal
@@ -11,6 +10,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from invariant.paths import PathError, normalize_path
 
 MODULE_NAME = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_.*?\[\]-]+$")
@@ -154,12 +155,12 @@ class SourceFile(APIModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str) -> str:
-        _reject_control_characters(value)
-        normalized = value.replace("\\", "/")
-        if normalized.startswith("/") or ".." in normalized.split("/"):
-            raise ValueError("must be a relative path without '..'")
-        # "./app/x.py" and "app//x.py" must map to the module app.x.
-        normalized = posixpath.normpath(normalized)
+        # The engine's own normalization, so "./app/x.py" and "app//x.py" are
+        # both the module app.x everywhere.
+        try:
+            normalized = normalize_path(value)
+        except PathError as exc:
+            raise ValueError(str(exc)) from exc
         if not normalized.endswith(".py"):
             raise ValueError("must identify a Python file")
         return normalized
