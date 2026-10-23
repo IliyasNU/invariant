@@ -305,6 +305,25 @@ def test_github_client_fetches_only_live_python_files():
     assert files == [SourceFile(path="app/service.py", content="import json\n")]
 
 
+def test_github_client_skips_files_with_invalid_paths():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls/7/files"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"filename": "app\\..\\escape.py", "status": "added"},
+                    {"filename": "app/service.py", "status": "modified"},
+                ],
+            )
+        return httpx.Response(200, content=b"import json\n")
+
+    settings = Settings(_env_file=None, github_api_url="https://api.github.test")
+    with GitHubClient(settings, transport=httpx.MockTransport(handler)) as github:
+        files = github.get_changed_python_files("owner", "repo", 7, "deadbeef")
+
+    assert files == [SourceFile(path="app/service.py", content="import json\n")]
+
+
 def test_github_client_maps_rate_limit_error():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, headers={"X-RateLimit-Remaining": "0"})

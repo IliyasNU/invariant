@@ -6,6 +6,7 @@ from typing import Any, Self
 from urllib.parse import quote
 
 import httpx
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.schemas import SourceFile
@@ -195,8 +196,13 @@ class GitHubClient:
             ):
                 continue
             content = self.get_file_content(owner, repo, path, head_sha)
-            if content is not None:
+            if content is None:
+                continue
+            try:
                 sources.append(SourceFile(path=path, content=content))
+            except ValidationError:
+                # Git allows paths the API rejects, such as pkg\..\mod.py.
+                continue
         return sources
 
     def post_pull_request_comment(
