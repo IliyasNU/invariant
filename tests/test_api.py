@@ -168,3 +168,20 @@ def test_analysis_rejects_invalid_python(client):
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "invalid_python"
     assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+
+
+def test_analysis_rejects_too_complex_python(client):
+    project = create_project(client)
+    response = client.post(
+        f"/projects/{project['id']}/analyze",
+        json={"files": [{"path": "deep.py", "content": "x = " + "-" * 200_000 + "1"}]},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "invalid_python",
+        "path": "deep.py",
+        "line": None,
+        "column": None,
+        "message": "Python source is too complex to parse",
+    }

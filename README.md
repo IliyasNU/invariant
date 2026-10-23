@@ -55,11 +55,28 @@ For each submitted `.py` file, Invariant converts its path to a module name:
 app/domain/payment.py -> app.domain.payment
 ```
 
-A rule applies when that module matches its `source_pattern` glob. The AST
-walker collects `import` and `from ... import ...` statements. An import
-violates a rule when it equals a forbidden module or starts with that module
-prefix. Results are sorted by path, line, column, and rule ID, making repeated
-analysis deterministic.
+Paths are normalized first, so `./app/domain/payment.py` and
+`app//domain/payment.py` name the same module.
+
+A rule applies when that module matches its `source_pattern` glob. A pattern
+ending in `.*` also covers the package itself, so `app.domain.*` applies to
+`app/domain/__init__.py` (`app.domain`) as well as to everything below it.
+
+The AST walker collects `import` and `from ... import ...` statements:
+
+- Relative imports are resolved against the file's package, the same way
+  Python does: `from ..infrastructure import db` in `app/domain/payment.py`
+  is checked as `app.infrastructure`. A relative import that climbs above the
+  top-level package cannot be resolved and is ignored.
+- `from package import name` is checked both as `package` and as
+  `package.name`, because `name` may be a submodule:
+  `from app import infrastructure` violates a rule that forbids
+  `app.infrastructure`.
+
+An import violates a rule when it equals a forbidden module or starts with that
+module prefix. A `from` import whose module is itself forbidden produces one
+violation per statement. Results are sorted by path, line, column, and rule ID,
+making repeated analysis deterministic.
 
 Example rule:
 
@@ -338,7 +355,7 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
   pull request through this REST endpoint.
 - Analysis is synchronous and currently supports only Python forbidden-import
   rules and absolute module prefixes.
-- Relative imports are parsed but are not resolved into absolute package names.
+- Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
 - The service has no authentication, organizations, authorization model, web UI,
   background queue, or deployment hardening yet. Do not expose it publicly
   without an appropriate trusted network boundary.

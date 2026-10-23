@@ -1,8 +1,16 @@
+import posixpath
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 MODULE_NAME = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_.*?\[\]-]+$")
@@ -106,7 +114,10 @@ class RuleResponse(APIModel):
 
 class SourceFile(APIModel):
     path: str = Field(min_length=1, max_length=500)
-    content: str = Field(max_length=1_000_000)
+    # Kept verbatim: stripping leading blank lines would shift reported line numbers.
+    content: Annotated[
+        str, StringConstraints(strip_whitespace=False, max_length=1_000_000)
+    ]
 
     @field_validator("path")
     @classmethod
@@ -114,6 +125,8 @@ class SourceFile(APIModel):
         normalized = value.replace("\\", "/")
         if normalized.startswith("/") or ".." in normalized.split("/"):
             raise ValueError("must be a relative path without '..'")
+        # "./app/x.py" and "app//x.py" must map to the module app.x.
+        normalized = posixpath.normpath(normalized)
         if not normalized.endswith(".py"):
             raise ValueError("must identify a Python file")
         return normalized
