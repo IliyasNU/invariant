@@ -46,7 +46,8 @@ flowchart LR
   `exclude_paths` and `fail_on`. Existing v0.1 projects remain valid with the
   GitHub fields null and the default settings.
 - A **Rule** belongs to one project and has a stable `key`, a unique `name`, a
-  `rule_type` (`forbidden_import`, `no_relative_import`, `max_file_lines`),
+  `rule_type` (`forbidden_import`, `forbidden_call`, `no_relative_import`,
+  `max_file_lines`),
   `enabled`, `severity`, `source_pattern`, `exclude_paths` and the fields of
   its type.
 - An **AnalysisRun** records its source (`direct`, `github_pr`, or
@@ -73,6 +74,9 @@ A rule applies when that module matches its `source_pattern` and the file is
 not excluded. `forbidden_import` checks `import` and `from ... import ...`
 statements, including relative ones resolved against the file's package, and
 `from package import name` as the possible submodule `package.name`.
+`forbidden_call` reports calls such as `os.system()` or `eval()` that can be
+traced to an import or a builtin, through aliases, and leaves alone a local
+name that shadows them.
 
 Example rule:
 
@@ -454,7 +458,7 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 - Columns count Unicode characters, 1-based. Runs stored before this change
   recorded UTF-8 byte offsets, which differ only after non-ASCII text on the
   same line.
-- Analysis is synchronous. `forbidden_call` rules are not available yet.
+- Analysis is synchronous.
 - Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
 - The service has no authentication, organizations, authorization model, web UI,
   background queue, or deployment hardening yet. Do not expose it publicly
