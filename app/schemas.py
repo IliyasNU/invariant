@@ -328,6 +328,32 @@ class PullRequestEvent(_StrictPayload):
     pull_request: _GitHubPullRequest
 
 
+class ConfigImportRequest(BaseModel):
+    # The file is used as written.
+    content: str = Field(max_length=1_000_000)
+    # merge keeps rules missing from the file; replace deletes them.
+    mode: Literal["merge", "replace"] = "merge"
+    # Report the changes without applying them.
+    dry_run: bool = False
+
+
+class SettingChange(APIModel):
+    field: str
+    before: Any
+    after: Any
+
+
+class ConfigImportPlan(APIModel):
+    mode: Literal["merge", "replace"]
+    dry_run: bool
+    applied: bool
+    project_changes: list[SettingChange]
+    created: list[str]
+    updated: list[str]
+    deleted: list[str]
+    unchanged: list[str]
+
+
 class GitHubAnalysisRequest(APIModel):
     pull_number: int = Field(ge=1)
 

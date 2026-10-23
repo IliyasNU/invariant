@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -10,20 +10,24 @@ from sqlalchemy.orm import Session
 
 from app.analysis import rule_columns, rule_data
 from app.analysis_service import load_analysis_run, persist_analysis
+from app.config_service import SOURCE, apply_import, export_config, plan_import
 from app.database import get_db
 from app.models import AnalysisRun, Project, Rule
 from app.schemas import (
     AnalysisRequest,
     AnalysisRunResponse,
     AnalysisRunSummaryResponse,
+    ConfigImportPlan,
+    ConfigImportRequest,
     ProjectCreate,
     ProjectResponse,
     ProjectUpdate,
     RuleCreate,
     RuleResponse,
     RuleUpdate,
+    SettingChange,
 )
-from invariant.config import RULES, RuleConfig
+from invariant.config import RULES, ConfigError, RuleConfig, parse_config
 
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_db)]
@@ -186,6 +190,64 @@ def delete_rule(project_id: int, rule_id: int, db: DatabaseSession) -> None:
     # Past violations keep their rule_name snapshot; rule_id becomes NULL.
     db.delete(_rule_or_404(project_id, rule_id, db))
     db.commit()
+
+
+@router.get(
+    "/projects/{project_id}/config",
+    response_class=Response,
+    responses={200: {"content": {"application/toml": {}}}},
+    description="The project's settings and rules as an invariant.toml file.",
+)
+def export_project_config(project_id: int, db: DatabaseSession) -> Response:
+    project = _project_or_404(project_id, db)
+    return Response(
+        content=export_config(project, _project_rules(project_id, db)),
+        media_type="application/toml",
+    )
+
+
+@router.post("/projects/{project_id}/config/import", response_model=ConfigImportPlan)
+def import_project_config(
+    project_id: int, payload: ConfigImportRequest, db: DatabaseSession
+) -> ConfigImportPlan:
+    """Apply an invariant.toml to the project, or preview it with dry_run.
+
+    Rules are matched by key. ``merge`` keeps rules the file does not mention;
+    ``replace`` deletes them. Everything is applied in one transaction.
+    """
+    project = _project_or_404(project_id, db)
+    rules = _project_rules(project_id, db)
+    try:
+        config = parse_config(payload.content, source=SOURCE)
+        plan = plan_import(project, rules, config, payload.mode)
+    except ConfigError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_config",
+                "message": "The configuration cannot be imported",
+                "problems": [
+                    {"location": location, "message": message}
+                    for location, message in exc.problems
+                ],
+            },
+        ) from exc
+    if not payload.dry_run:
+        apply_import(db, project, plan)
+        _commit(db, RULE_CONFLICT)
+    return ConfigImportPlan(
+        mode=payload.mode,
+        dry_run=payload.dry_run,
+        applied=not payload.dry_run,
+        project_changes=[
+            SettingChange(field=name, before=before, after=after)
+            for name, before, after in plan.project_changes
+        ],
+        created=[rule.key for rule in plan.created],
+        updated=[rule.key for rule, _config in plan.updated],
+        deleted=[rule.key for rule in plan.deleted],
+        unchanged=[rule.key for rule in plan.unchanged],
+    )
 
 
 @router.post("/projects/{project_id}/analyze", response_model=AnalysisRunResponse)
