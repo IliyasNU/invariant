@@ -174,6 +174,11 @@ The v0.2 migration adds nullable GitHub fields to existing projects, then create
 analysis run and violation tables. It does not delete or rewrite v0.1 project or
 rule data.
 
+Migration `20261024_0003` changes the violation `imported_module` and `message`
+columns to `TEXT`, because a valid import can exceed the previous 500- and
+1,000-character limits. Downgrading fails rather than truncating if a longer
+value is stored.
+
 ## API
 
 ### Projects and rules
@@ -263,7 +268,10 @@ v0.1 summary and violation fields:
 ```
 
 Malformed Python returns a structured `422 invalid_python` response and does not
-create a completed analysis run.
+create a completed analysis run. File paths must be relative, end in `.py`, and
+contain no `..` segment and no control characters. Project and rule names may
+not contain control characters either; descriptions may contain tabs and line
+breaks.
 
 ### Manual GitHub pull request analysis
 
@@ -276,9 +284,21 @@ curl -X POST http://127.0.0.1:8000/projects/1/analyze/github \
 ```
 
 Invariant fetches PR metadata and the changed-file list through GitHub's REST
-API, downloads each eligible file at the PR head SHA, runs the shared AST
-analyzer, persists the result, and returns the full run. Deleted files and
-non-Python files are skipped.
+API, downloads each changed Python file at the PR head SHA, runs the shared AST
+analyzer, persists the result, and returns the full run. Removed and non-Python
+files are outside the analysis.
+
+A run means something only if every changed Python file was checked. In two
+cases Invariant therefore returns a structured `422` instead of a run, and posts
+no PR comment:
+
+| Code | When | Extra fields |
+| --- | --- | --- |
+| `analysis_incomplete` | A changed `.py` file is over 1 MB (`too_large`), is not UTF-8 (`undecodable`) or has a path the API rejects (`invalid_path`); or GitHub listed fewer files than the PR changes | `skipped` (`path`, `reason`), `file_list_truncated` |
+| `not_applicable` | The PR changes no Python files | `ignored_files` |
+
+v0.2 does not store these outcomes. Persisted `incomplete` and
+`not_applicable` results are planned for v1.0.
 
 GitHub 404s, rate limits, authorization failures, malformed responses, and
 network failures are translated to structured API errors without exposing
@@ -297,6 +317,12 @@ The project endpoint returns newest-first summaries, 50 per page by default
 returns the summary plus persisted violations. Missing projects or runs return
 404.
 
+### Errors
+
+Request validation errors return `422`. `503 Database unavailable` means
+PostgreSQL could not be reached; any other database failure returns
+`500 storage_error` without SQL or driver details and is logged on the server.
+
 ## GitHub webhook
 
 Configure a strong random `GITHUB_WEBHOOK_SECRET`, then add a GitHub repository
@@ -313,6 +339,13 @@ comparison before parsing or acting on the payload. It analyzes pull request
 actions `opened`, `synchronize`, and `reopened`; other events/actions return a
 clean `202 ignored` response.
 
+A pull request without Python files returns `202` with status
+`not_applicable`. An incomplete analysis returns the same
+`422 analysis_incomplete` as the manual endpoint. The payload fields Invariant
+uses are type-checked before use: a signed request with, for example,
+`"action": []` or a string pull request number gets
+`400 invalid_webhook_payload`; an unsigned request still gets `401`.
+
 For relevant events, repository owner/name selects the configured project. The
 `X-GitHub-Delivery` value is persisted with a unique constraint, so retrying the
 same delivery returns the existing run instead of creating a duplicate. Manual
@@ -327,7 +360,8 @@ GITHUB_TOKEN=github-token-with-repository-comment-permission
 GITHUB_POST_PR_COMMENT=true
 ```
 
-Invariant posts either `Invariant: PASS` or a concise violation list. A comment
+Invariant posts either `Invariant: PASS` or a concise violation list, and only
+for a stored run: incomplete and not-applicable analyses post nothing. A comment
 failure is logged without secrets and does not roll back or fail the completed
 analysis. GitHub Check Runs are intentionally out of scope for v0.2.
 
@@ -370,7 +404,18 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 - Invariant never executes submitted or downloaded code.
 - GitHub content is limited to changed, non-deleted `.py` files that decode as
   UTF-8 and are at most 1 MB. GitHub exposes at most 3,000 changed files for one
-  pull request through this REST endpoint.
+  pull request through this REST endpoint. A pull request beyond these limits
+  is reported as `analysis_incomplete`, never analyzed partially, and that
+  outcome is not stored in the history.
+- Module names come from repository-relative paths. `src/` layouts and other
+  source roots are not supported yet: `src/app/domain/x.py` is the module
+  `src.app.domain.x`, and its relative imports resolve inside `src`.
+- A project without rules, or files that no rule's `source_pattern` covers,
+  still produce `passed: true`. v0.2 does not tell such runs apart from a real
+  pass.
+- Columns in violations are 1-based UTF-8 byte offsets as reported by
+  Python's `ast` module, so non-ASCII text earlier on the same line shifts
+  them.
 - Analysis is synchronous and currently supports only Python forbidden-import
   rules and absolute module prefixes.
 - Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
@@ -379,8 +424,14 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
   without an appropriate trusted network boundary.
 - Repository-wide unchanged files are not analyzed; v0.2 evaluates changed PR
   files only.
+- CI checks the code, the migrations and the tests on SQLite and PostgreSQL,
+  but does not build or smoke-test the Docker image yet.
 
 ## Roadmap
+
+The v1.0 requirements and what this branch already covers, with the tests
+that prove it, are tracked in
+[`docs/v1.0-traceability.md`](docs/v1.0-traceability.md).
 
 Potential v0.3+ work belongs here rather than in the v0.2 implementation:
 
