@@ -15,6 +15,18 @@ from pydantic import (
 MODULE_NAME = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_.*?\[\]-]+$")
 GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+# PostgreSQL cannot store NUL, and other control characters only break output.
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Free text may keep tabs and line breaks.
+TEXT_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _reject_control_characters(
+    value: str | None, pattern: re.Pattern[str] = CONTROL_CHARACTERS
+) -> str | None:
+    if value is not None and pattern.search(value):
+        raise ValueError("must not contain control characters")
+    return value
 
 
 def _normalize_github_name(value: str | None) -> str | None:
@@ -33,6 +45,16 @@ class ProjectCreate(APIModel):
     github_owner: str | None = Field(default=None, min_length=1, max_length=100)
     github_repo: str | None = Field(default=None, min_length=1, max_length=100)
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _reject_control_characters(value)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str | None) -> str | None:
+        return _reject_control_characters(value, TEXT_CONTROL_CHARACTERS)
+
     @field_validator("github_owner", "github_repo")
     @classmethod
     def normalize_github_name(cls, value: str | None) -> str | None:
@@ -49,6 +71,11 @@ class ProjectUpdate(APIModel):
     description: str | None = Field(default=None, max_length=1000)
     github_owner: str | None = Field(default=None, min_length=1, max_length=100)
     github_repo: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str | None) -> str | None:
+        return _reject_control_characters(value, TEXT_CONTROL_CHARACTERS)
 
     @field_validator("github_owner", "github_repo")
     @classmethod
@@ -82,6 +109,11 @@ class RuleCreate(APIModel):
     rule_type: Literal["forbidden_import"] = "forbidden_import"
     source_pattern: str = Field(default="*", min_length=1, max_length=255)
     forbidden_imports: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _reject_control_characters(value)
 
     @field_validator("source_pattern")
     @classmethod
@@ -122,6 +154,7 @@ class SourceFile(APIModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str) -> str:
+        _reject_control_characters(value)
         normalized = value.replace("\\", "/")
         if normalized.startswith("/") or ".." in normalized.split("/"):
             raise ValueError("must be a relative path without '..'")
@@ -183,6 +216,32 @@ class PersistedViolationResponse(ViolationResponse):
 
 class AnalysisRunResponse(AnalysisRunSummaryResponse):
     violations: list[PersistedViolationResponse]
+
+
+class _StrictPayload(BaseModel):
+    # Webhook JSON is never coerced: "12" or true is not a pull request number.
+    model_config = ConfigDict(strict=True)
+
+
+class _GitHubAccount(_StrictPayload):
+    login: str = Field(min_length=1)
+
+
+class _GitHubRepository(_StrictPayload):
+    name: str = Field(min_length=1)
+    owner: _GitHubAccount
+
+
+class _GitHubPullRequest(_StrictPayload):
+    number: int = Field(ge=1)
+
+
+class PullRequestEvent(_StrictPayload):
+    """The fields of a GitHub ``pull_request`` webhook payload that Invariant uses."""
+
+    action: str
+    repository: _GitHubRepository
+    pull_request: _GitHubPullRequest
 
 
 class GitHubAnalysisRequest(APIModel):

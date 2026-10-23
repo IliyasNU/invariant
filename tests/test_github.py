@@ -282,6 +282,66 @@ def test_webhook_rejects_incomplete_analysis_without_run(client, github, monkeyp
     assert github.comment_calls == 0
 
 
+def valid_event(**changes) -> dict:
+    return {**pull_request_payload(), **changes}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": []},
+        {"action": {"opened": True}},
+        {"pull_request": {"number": 12}},
+        valid_event(repository={"name": [], "owner": {"login": "IliyasNU"}}),
+        valid_event(repository={"name": "invariant", "owner": "IliyasNU"}),
+        valid_event(repository={"name": "invariant", "owner": {"login": ""}}),
+        valid_event(pull_request={"number": "12"}),
+        valid_event(pull_request={"number": True}),
+        valid_event(pull_request={"number": 0}),
+        valid_event(pull_request=[]),
+    ],
+)
+def test_webhook_rejects_malformed_signed_payloads(
+    client, github, monkeypatch, payload
+):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    project = create_github_project(client)
+    body = json.dumps(payload).encode()
+
+    response = client.post(
+        "/integrations/github/webhook", content=body, headers=signed_headers(body)
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_webhook_payload"
+    assert github.pull_calls == 0
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+
+
+def test_webhook_rejects_deeply_nested_json(client, github, monkeypatch):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    body = b"[" * 100_000 + b"]" * 100_000
+
+    response = client.post(
+        "/integrations/github/webhook", content=body, headers=signed_headers(body)
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_webhook_payload"
+
+
+def test_webhook_checks_signature_before_payload_types(client, github, monkeypatch):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    headers = signed_headers(b"{}")
+    body = json.dumps({"action": []}).encode()
+
+    response = client.post(
+        "/integrations/github/webhook", content=body, headers=headers
+    )
+
+    assert response.status_code == 401
+
+
 def test_webhook_signature_validation():
     body = b'{"action":"opened"}'
     signature = (

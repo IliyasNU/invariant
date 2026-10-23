@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,7 +13,12 @@ from app.config import Settings
 from app.database import get_db
 from app.github import GitHubClient, get_github_client, verify_webhook_signature
 from app.models import AnalysisRun, Project
-from app.schemas import AnalysisRunResponse, GitHubAnalysisRequest, WebhookResponse
+from app.schemas import (
+    AnalysisRunResponse,
+    GitHubAnalysisRequest,
+    PullRequestEvent,
+    WebhookResponse,
+)
 
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_db)]
@@ -93,7 +99,7 @@ def github_webhook(
 
     try:
         payload = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise HTTPException(
             status_code=400,
             detail={"code": "invalid_webhook_payload", "message": "Invalid JSON"},
@@ -109,6 +115,14 @@ def github_webhook(
         )
 
     action = payload.get("action")
+    if not isinstance(action, str):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_webhook_payload",
+                "message": "Pull request action must be a string",
+            },
+        )
     if action not in {"opened", "synchronize", "reopened"}:
         response = WebhookResponse(
             status="ignored", detail="Pull request action is not analyzed"
@@ -133,33 +147,18 @@ def github_webhook(
         return WebhookResponse(status="duplicate", analysis_run_id=existing.id)
 
     try:
-        owner = payload["repository"]["owner"]["login"].lower()
-        repo = payload["repository"]["name"].lower()
-        pull_number = payload["pull_request"]["number"]
-    except (AttributeError, KeyError, TypeError) as exc:
+        event = PullRequestEvent.model_validate(payload)
+    except ValidationError as exc:
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "invalid_webhook_payload",
-                "message": "Repository or pull request metadata is missing",
+                "message": "Repository or pull request metadata is missing or invalid",
             },
         ) from exc
-    if (
-        not isinstance(owner, str)
-        or not isinstance(repo, str)
-        or not owner
-        or not repo
-        or not isinstance(pull_number, int)
-        or isinstance(pull_number, bool)
-        or pull_number < 1
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "invalid_webhook_payload",
-                "message": "Repository or pull request metadata is invalid",
-            },
-        )
+    owner = event.repository.owner.login.lower()
+    repo = event.repository.name.lower()
+    pull_number = event.pull_request.number
 
     project = db.scalar(
         select(Project).where(

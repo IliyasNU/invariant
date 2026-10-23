@@ -295,3 +295,38 @@ def test_only_connection_errors_report_the_database_unavailable(
         assert response.json()["detail"]["code"] == "storage_error"
     else:
         assert response.json() == {"detail": "Database unavailable"}
+
+
+@pytest.mark.parametrize(
+    "path", ["bad\u0000.py", "app/\u001b[31mred.py", "line\nbreak.py", "del\u007f.py"]
+)
+def test_paths_with_control_characters_are_rejected(client, path):
+    project = create_project(client)
+
+    response = client.post(
+        f"/projects/{project['id']}/analyze",
+        json={"files": [{"path": path, "content": "import json\n"}]},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+
+
+def test_stored_text_rejects_control_characters(client):
+    assert client.post("/projects", json={"name": "a\u0000b"}).status_code == 422
+    assert (
+        client.post("/projects", json={"name": "Nul", "description": "x\u0000"})
+    ).status_code == 422
+    project = client.post(
+        "/projects", json={"name": "Text", "description": "line one\nline two\tend"}
+    )
+    assert project.status_code == 201
+    assert project.json()["description"] == "line one\nline two\tend"
+
+    project_id = project.json()["id"]
+    assert (
+        client.patch(f"/projects/{project_id}", json={"description": "\u0000"})
+    ).status_code == 422
+    rule = {"name": "r\u0000", "forbidden_imports": ["fastapi"]}
+    assert client.post(f"/projects/{project_id}/rules", json=rule).status_code == 422
+    assert client.get("/projects").json() == [project.json()]
