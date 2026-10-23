@@ -41,50 +41,38 @@ flowchart LR
 
 ## Data model
 
-- A **Project** has a unique name and optional paired `github_owner` /
-  `github_repo` configuration. Existing v0.1 projects remain valid with both
-  fields null and can be configured later.
-- A **Rule** belongs to one project. v0.2 supports `forbidden_import` rules.
+- A **Project** has a unique name, optional paired `github_owner` /
+  `github_repo` configuration, and analysis settings: `source_roots`,
+  `exclude_paths` and `fail_on`. Existing v0.1 projects remain valid with the
+  GitHub fields null and the default settings.
+- A **Rule** belongs to one project and has a stable `key`, a unique `name`, a
+  `rule_type` (`forbidden_import`, `no_relative_import`, `max_file_lines`),
+  `enabled`, `severity`, `source_pattern`, `exclude_paths` and the fields of
+  its type.
 - An **AnalysisRun** records its source (`direct`, `github_pr`, or
   `github_webhook`), status, pass/fail result, repository/PR metadata, counts,
   and creation time.
-- An **AnalysisViolation** snapshots the rule name and diagnostic location so
-  history remains useful independently of future rule changes.
+- An **AnalysisViolation** is a diagnostic: its kind, code and severity, a
+  snapshot of the rule's key and name, the location, and data for the rule
+  type. History stays readable when rules change or are deleted.
 
 ## How rules work
 
-This section describes the rules the API stores today. The engine supports more
-(`no_relative_import`, `max_file_lines`, severities, exclusions and source
-roots); see [`docs/configuration.md`](docs/configuration.md).
-
-For each submitted `.py` file, Invariant converts its path to a module name:
+The rule types, their fields, source roots, the two kinds of pattern and the
+meaning of results are described in
+[`docs/configuration.md`](docs/configuration.md). In short, for each submitted
+`.py` file Invariant derives a module name from its path relative to its source
+root:
 
 ```text
-app/domain/payment.py -> app.domain.payment
+app/domain/payment.py -> app.domain.payment         (source root ".")
+src/app/domain/payment.py -> app.domain.payment     (source root "src")
 ```
 
-Paths are normalized first, so `./app/domain/payment.py` and
-`app//domain/payment.py` name the same module.
-
-A rule applies when that module matches its `source_pattern` glob. A pattern
-ending in `.*` also covers the package itself, so `app.domain.*` applies to
-`app/domain/__init__.py` (`app.domain`) as well as to everything below it.
-
-The AST walker collects `import` and `from ... import ...` statements:
-
-- Relative imports are resolved against the file's package, the same way
-  Python does: `from ..infrastructure import db` in `app/domain/payment.py`
-  is checked as `app.infrastructure`. A relative import that climbs above the
-  top-level package cannot be resolved and is ignored.
-- `from package import name` is checked both as `package` and as
-  `package.name`, because `name` may be a submodule:
-  `from app import infrastructure` violates a rule that forbids
-  `app.infrastructure`.
-
-An import violates a rule when it equals a forbidden module or starts with that
-module prefix. A `from` import whose module is itself forbidden produces one
-violation per statement. Results are sorted by path, line, column, and rule ID,
-making repeated analysis deterministic.
+A rule applies when that module matches its `source_pattern` and the file is
+not excluded. `forbidden_import` checks `import` and `from ... import ...`
+statements, including relative ones resolved against the file's package, and
+`from package import name` as the possible submodule `package.name`.
 
 Example rule:
 
@@ -99,7 +87,8 @@ Example rule:
 
 `from app.infrastructure.db import repository` inside
 `app/domain/payment.py` produces a structured violation with the rule, path,
-line, column, imported module, and explanation.
+line, column, imported module, and explanation. Results are sorted by path,
+line, column and rule key, so repeated analysis is deterministic.
 
 ## Local development
 
@@ -205,7 +194,10 @@ curl http://127.0.0.1:8000/projects
 curl http://127.0.0.1:8000/projects/1
 ```
 
-Associate an existing v0.1 project with GitHub, or clear both fields with null:
+`PATCH /projects/{id}` changes only the fields it sends: `name`,
+`description`, the GitHub pair (set both, or clear both with null),
+`source_roots`, `exclude_paths` and `fail_on`. Associate an existing v0.1
+project with GitHub:
 
 ```bash
 curl -X PATCH http://127.0.0.1:8000/projects/1 \
@@ -213,7 +205,13 @@ curl -X PATCH http://127.0.0.1:8000/projects/1 \
   -d '{"github_owner":"example-org","github_repo":"payments"}'
 ```
 
-Add and list rules:
+`DELETE /projects/{id}` returns `204` and deletes the project **together with
+its rules and its entire analysis history**.
+
+Rules of every type share `key`, `name`, `enabled`, `severity`,
+`source_pattern` and `exclude_paths`. `rule_type` defaults to
+`forbidden_import` and `key` to a slug of the name, so v0.1/v0.2 request
+bodies keep working:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/projects/1/rules \
@@ -224,12 +222,42 @@ curl -X POST http://127.0.0.1:8000/projects/1/rules \
     "forbidden_imports":["app.infrastructure"]
   }'
 
+curl -X POST http://127.0.0.1:8000/projects/1/rules \
+  -H "Content-Type: application/json" \
+  -d '{"key":"small-files","rule_type":"max_file_lines","max_lines":400,"severity":"warning"}'
+
 curl http://127.0.0.1:8000/projects/1/rules
+curl http://127.0.0.1:8000/projects/1/rules/1
+curl -X PATCH http://127.0.0.1:8000/projects/1/rules/1 \
+  -H "Content-Type: application/json" -d '{"enabled":false}'
 curl -X DELETE http://127.0.0.1:8000/projects/1/rules/1
 ```
 
-Deleting a rule returns `204`. Past violations keep the rule name they were
-recorded with; their `rule_id` becomes null.
+Keys and names are unique within a project (`409` otherwise). A rule is
+reachable only through its own project, so another project's rule ID returns
+`404`. `PATCH` validates the merged rule again and cannot change `rule_type`.
+Deleting a rule returns `204`; past violations keep the rule key and name they
+were recorded with, and their `rule_id` becomes null.
+
+### Configuration export and import
+
+A project's settings and rules can be exported as an
+[`invariant.toml`](docs/configuration.md) file and imported back:
+
+```bash
+curl http://127.0.0.1:8000/projects/1/config -o invariant.toml
+
+curl -X POST http://127.0.0.1:8000/projects/1/config/import \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --rawfile content invariant.toml '{content: $content, dry_run: true}')"
+```
+
+Import matches rules by `key` and answers with the plan: `created`, `updated`,
+`deleted`, `unchanged` and `project_changes`. With `dry_run: true` nothing is
+changed. `mode` is `merge` (default: rules missing from the file stay) or
+`replace` (they are deleted). Everything is applied in one transaction. An
+invalid file returns `422 invalid_config` with each problem and its location,
+for example `rules[0].max_lines`.
 
 ### Direct code analysis
 
@@ -275,6 +303,11 @@ v0.1 summary and violation fields:
 }
 ```
 
+Violations carry `kind`, `code` (the rule type), `severity`, `rule_key` and
+type-specific `data` in addition to the fields above. `passed` is false only
+when a violation reaches the project's `fail_on` severity: warnings are
+reported but pass by default.
+
 Malformed Python returns a structured `422 invalid_python` response and does not
 create a completed analysis run. File paths must be relative, end in `.py`, and
 contain no `..` segment and no control characters. Project and rule names may
@@ -303,7 +336,7 @@ no PR comment:
 | Code | When | Extra fields |
 | --- | --- | --- |
 | `analysis_incomplete` | A changed `.py` file is over 1 MB (`too_large`), is not UTF-8 (`undecodable`) or has a path the API rejects (`invalid_path`); or GitHub listed fewer files than the PR changes | `skipped` (`path`, `reason`), `file_list_truncated` |
-| `not_applicable` | The PR changes no Python files | `ignored_files` |
+| `not_applicable` | The PR changes no Python files, or no enabled rule applies to the changed ones (for example, all are excluded) | `ignored_files` |
 
 v0.2 does not store these outcomes. Persisted `incomplete` and
 `not_applicable` results are planned for v1.0.
@@ -415,18 +448,13 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
   pull request through this REST endpoint. A pull request beyond these limits
   is reported as `analysis_incomplete`, never analyzed partially, and that
   outcome is not stored in the history.
-- The API does not expose source roots yet: through the API,
-  `src/app/domain/x.py` is the module `src.app.domain.x`, and its relative
-  imports resolve inside `src`. The engine and its configuration format already
-  support `source_roots`.
-- A project without rules, or files that no rule's `source_pattern` covers,
-  still produce `passed: true`. v0.2 does not tell such runs apart from a real
-  pass.
+- Direct analysis of a project without rules, or of files that no rule
+  covers, still produces `passed: true`; such runs are not yet told apart from
+  a real pass (GitHub analysis refuses them as `not_applicable`).
 - Columns count Unicode characters, 1-based. Runs stored before this change
   recorded UTF-8 byte offsets, which differ only after non-ASCII text on the
   same line.
-- Through the API, analysis is synchronous and supports only
-  `forbidden_import` rules; the engine's other rule types arrive in the API next.
+- Analysis is synchronous. `forbidden_call` rules are not available yet.
 - Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
 - The service has no authentication, organizations, authorization model, web UI,
   background queue, or deployment hardening yet. Do not expose it publicly
