@@ -1,7 +1,15 @@
+import logging
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import (
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyError,
+)
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from app.analysis import SourceSyntaxError
 from app.analysis_service import (
@@ -13,6 +21,8 @@ from app.api import router
 from app.database import engine
 from app.github import GitHubAPIError
 from app.github_api import router as github_router
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Invariant",
@@ -103,10 +113,24 @@ def analysis_not_applicable_handler(
 
 
 @app.exception_handler(SQLAlchemyError)
-def database_error_handler(_request: Request, _exc: SQLAlchemyError) -> JSONResponse:
+def database_error_handler(_request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    if isinstance(
+        exc, OperationalError | InterfaceError | DisconnectionError | PoolTimeoutError
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Database unavailable"},
+        )
+    # The database is up but rejected the statement: a bug, not an outage.
+    logger.error("Database rejected a statement", exc_info=exc)
     return JSONResponse(
-        status_code=503,
-        content={"detail": "Database unavailable"},
+        status_code=500,
+        content={
+            "detail": {
+                "code": "storage_error",
+                "message": "The database rejected the operation",
+            }
+        },
     )
 
 

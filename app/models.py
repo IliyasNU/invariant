@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -112,7 +113,7 @@ class AnalysisViolation(Base):
     path: Mapped[str] = mapped_column(String(500))
     line: Mapped[int | None] = mapped_column(Integer)
     column: Mapped[int | None] = mapped_column(Integer)
-    imported_module: Mapped[str | None] = mapped_column(String(500))
-    message: Mapped[str] = mapped_column(String(1000))
+    imported_module: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text)
 
     analysis_run: Mapped[AnalysisRun] = relationship(back_populates="violations")

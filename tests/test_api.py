@@ -1,3 +1,7 @@
+import pytest
+from sqlalchemy.exc import DataError, OperationalError
+
+
 def create_project(client, name="Payments"):
     response = client.post(
         "/projects", json={"name": name, "description": "Payment service rules"}
@@ -235,3 +239,59 @@ def test_analysis_history_is_paginated_newest_first(client):
     assert [run["id"] for run in page] == run_ids[:1]
     assert client.get(url, params={"limit": 0}).status_code == 422
     assert client.get(url, params={"limit": 201}).status_code == 422
+
+
+def test_long_diagnostics_are_stored_and_read_back(client):
+    project = create_project(client)
+    long_import = "app.infrastructure." + "a" * 600
+    long_forbidden = "app." + "b" * 1100
+    response = client.post(
+        f"/projects/{project['id']}/rules",
+        json={
+            "name": "Infrastructure",
+            "source_pattern": "*",
+            "forbidden_imports": ["app.infrastructure", long_forbidden],
+        },
+    )
+    assert response.status_code == 201
+
+    run = analyze(
+        client,
+        project["id"],
+        content=f"import {long_import}\nimport {long_forbidden}\n",
+    )
+
+    assert [item["imported_module"] for item in run["violations"]] == [
+        long_import,
+        long_forbidden,
+    ]
+    assert len(run["violations"][1]["message"]) > 2000
+    assert client.get(f"/analysis-runs/{run['id']}").json() == run
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        (OperationalError("SELECT 1", {}, Exception("connection refused")), 503),
+        (DataError("INSERT", {}, Exception("value too long")), 500),
+    ],
+)
+def test_only_connection_errors_report_the_database_unavailable(
+    client, monkeypatch, error, status_code
+):
+    project = create_project(client)
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr("app.api.persist_analysis", fail)
+    response = client.post(
+        f"/projects/{project['id']}/analyze",
+        json={"files": [{"path": "app/x.py", "content": "import json\n"}]},
+    )
+
+    assert response.status_code == status_code
+    if status_code == 500:
+        assert response.json()["detail"]["code"] == "storage_error"
+    else:
+        assert response.json() == {"detail": "Database unavailable"}
