@@ -33,6 +33,10 @@ flowchart LR
 - **httpx** contains all GitHub REST networking in `app/github.py`.
 - The shared analysis workflow in `app/analysis_service.py` is independent of
   whether source files came from an HTTP body, GitHub, or a future client.
+- **`src/invariant`** is the analysis engine: configuration schema, source
+  roots, rule types and results. The service runs it through `app/analysis.py`,
+  and the upcoming CLI will run the same code. Its configuration format and
+  semantics are described in [`docs/configuration.md`](docs/configuration.md).
 - The core analyzer never executes submitted code.
 
 ## Data model
@@ -48,6 +52,10 @@ flowchart LR
   history remains useful independently of future rule changes.
 
 ## How rules work
+
+This section describes the rules the API stores today. The engine supports more
+(`no_relative_import`, `max_file_lines`, severities, exclusions and source
+roots); see [`docs/configuration.md`](docs/configuration.md).
 
 For each submitted `.py` file, Invariant converts its path to a module name:
 
@@ -378,9 +386,9 @@ uv sync --dev
 uv run pytest
 INVARIANT_TEST_DATABASE_URL=postgresql+psycopg://invariant:invariant@localhost:5433/invariant_test \
   uv run pytest
-uv run ruff check app migrations tests
-uv run ruff format --check app migrations tests
-uv run python -m compileall -q app migrations tests
+uv run ruff check app migrations src tests
+uv run ruff format --check app migrations src tests
+uv run python -m compileall -q app migrations src tests
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs ruff, applies and checks the
@@ -407,17 +415,18 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
   pull request through this REST endpoint. A pull request beyond these limits
   is reported as `analysis_incomplete`, never analyzed partially, and that
   outcome is not stored in the history.
-- Module names come from repository-relative paths. `src/` layouts and other
-  source roots are not supported yet: `src/app/domain/x.py` is the module
-  `src.app.domain.x`, and its relative imports resolve inside `src`.
+- The API does not expose source roots yet: through the API,
+  `src/app/domain/x.py` is the module `src.app.domain.x`, and its relative
+  imports resolve inside `src`. The engine and its configuration format already
+  support `source_roots`.
 - A project without rules, or files that no rule's `source_pattern` covers,
   still produce `passed: true`. v0.2 does not tell such runs apart from a real
   pass.
-- Columns in violations are 1-based UTF-8 byte offsets as reported by
-  Python's `ast` module, so non-ASCII text earlier on the same line shifts
-  them.
-- Analysis is synchronous and currently supports only Python forbidden-import
-  rules and absolute module prefixes.
+- Columns count Unicode characters, 1-based. Runs stored before this change
+  recorded UTF-8 byte offsets, which differ only after non-ASCII text on the
+  same line.
+- Through the API, analysis is synchronous and supports only
+  `forbidden_import` rules; the engine's other rule types arrive in the API next.
 - Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
 - The service has no authentication, organizations, authorization model, web UI,
   background queue, or deployment hardening yet. Do not expose it publicly
