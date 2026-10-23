@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -105,6 +105,19 @@ def list_rules(project_id: int, db: DatabaseSession) -> list[Rule]:
     return list(db.scalars(statement))
 
 
+@router.delete(
+    "/projects/{project_id}/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_rule(project_id: int, rule_id: int, db: DatabaseSession) -> None:
+    _project_or_404(project_id, db)
+    rule = db.get(Rule, rule_id)
+    if rule is None or rule.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    # Past violations keep their rule_name snapshot; rule_id becomes NULL.
+    db.delete(rule)
+    db.commit()
+
+
 @router.post("/projects/{project_id}/analyze", response_model=AnalysisRunResponse)
 def analyze_project(
     project_id: int, payload: AnalysisRequest, db: DatabaseSession
@@ -117,12 +130,19 @@ def analyze_project(
     "/projects/{project_id}/analysis-runs",
     response_model=list[AnalysisRunSummaryResponse],
 )
-def list_analysis_runs(project_id: int, db: DatabaseSession) -> list[AnalysisRun]:
+def list_analysis_runs(
+    project_id: int,
+    db: DatabaseSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[AnalysisRun]:
     _project_or_404(project_id, db)
     statement = (
         select(AnalysisRun)
         .where(AnalysisRun.project_id == project_id)
         .order_by(AnalysisRun.id.desc())
+        .limit(limit)
+        .offset(offset)
     )
     return list(db.scalars(statement))
 

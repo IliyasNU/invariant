@@ -185,3 +185,53 @@ def test_analysis_rejects_too_complex_python(client):
         "column": None,
         "message": "Python source is too complex to parse",
     }
+
+
+def analyze(client, project_id, content="import json\n"):
+    response = client.post(
+        f"/projects/{project_id}/analyze",
+        json={"files": [{"path": "app/domain/service.py", "content": content}]},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_rule_deletion_keeps_history(client):
+    project = create_project(client)
+    other = create_project(client, name="Other")
+    rule = client.post(
+        f"/projects/{project['id']}/rules",
+        json={
+            "name": "Domain isolation",
+            "source_pattern": "app.domain.*",
+            "forbidden_imports": ["fastapi"],
+        },
+    ).json()
+    run = analyze(client, project["id"], content="import fastapi\n")
+    assert run["violations"][0]["rule_id"] == rule["id"]
+
+    url = f"/projects/{project['id']}/rules/{rule['id']}"
+    assert (
+        client.delete(f"/projects/{other['id']}/rules/{rule['id']}").status_code == 404
+    )
+    assert client.delete(url).status_code == 204
+    assert client.delete(url).status_code == 404
+    assert client.get(f"/projects/{project['id']}/rules").json() == []
+
+    [violation] = client.get(f"/analysis-runs/{run['id']}").json()["violations"]
+    assert violation["rule_id"] is None
+    assert violation["rule_name"] == "Domain isolation"
+
+
+def test_analysis_history_is_paginated_newest_first(client):
+    project = create_project(client)
+    run_ids = [analyze(client, project["id"])["id"] for _ in range(3)]
+    url = f"/projects/{project['id']}/analysis-runs"
+
+    assert [run["id"] for run in client.get(url).json()] == run_ids[::-1]
+    page = client.get(url, params={"limit": 2}).json()
+    assert [run["id"] for run in page] == run_ids[:0:-1]
+    page = client.get(url, params={"limit": 2, "offset": 2}).json()
+    assert [run["id"] for run in page] == run_ids[:1]
+    assert client.get(url, params={"limit": 0}).status_code == 422
+    assert client.get(url, params={"limit": 201}).status_code == 422

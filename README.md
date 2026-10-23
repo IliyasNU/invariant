@@ -147,6 +147,10 @@ The app container waits for a healthy database, runs `alembic upgrade head`,
 and connects to PostgreSQL through Compose service DNS at `db:5432`. The image
 runs as an unprivileged `invariant` user.
 
+Both published ports bind to `127.0.0.1` only, because the API has no
+authentication and the database uses local example credentials. Put a reverse
+proxy or tunnel in front of the app to receive GitHub webhooks.
+
 Useful commands:
 
 ```bash
@@ -208,7 +212,11 @@ curl -X POST http://127.0.0.1:8000/projects/1/rules \
   }'
 
 curl http://127.0.0.1:8000/projects/1/rules
+curl -X DELETE http://127.0.0.1:8000/projects/1/rules/1
 ```
+
+Deleting a rule returns `204`. Past violations keep the rule name they were
+recorded with; their `rule_id` becomes null.
 
 ### Direct code analysis
 
@@ -280,10 +288,12 @@ credentials or upstream payloads.
 
 ```bash
 curl http://127.0.0.1:8000/projects/1/analysis-runs
+curl "http://127.0.0.1:8000/projects/1/analysis-runs?limit=20&offset=20"
 curl http://127.0.0.1:8000/analysis-runs/42
 ```
 
-The project endpoint returns newest-first summaries. The global run endpoint
+The project endpoint returns newest-first summaries, 50 per page by default
+(`limit` 1–200, `offset` ≥ 0). The global run endpoint
 returns the summary plus persisted violations. Missing projects or runs return
 404.
 
@@ -324,16 +334,24 @@ analysis. GitHub Check Runs are intentionally out of scope for v0.2.
 ## Testing and quality checks
 
 External GitHub calls are mocked; tests require no token and do not mutate a
-GitHub repository. SQLite provides fast per-test isolation, while PostgreSQL and
-container behavior should be verified separately.
+GitHub repository. SQLite (with foreign keys enabled) provides fast per-test
+isolation. Set `INVARIANT_TEST_DATABASE_URL` to run the same suite against
+PostgreSQL; the tests drop and recreate the schema, so use a disposable
+database.
 
 ```bash
 uv sync --dev
 uv run pytest
+INVARIANT_TEST_DATABASE_URL=postgresql+psycopg://invariant:invariant@localhost:5433/invariant_test \
+  uv run pytest
 uv run ruff check app migrations tests
 uv run ruff format --check app migrations tests
 uv run python -m compileall -q app migrations tests
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs ruff, applies and checks the
+migrations against PostgreSQL 18, and runs the tests on SQLite and PostgreSQL
+for every pull request and every push to `main`.
 
 Real local verification:
 
