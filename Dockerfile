@@ -14,6 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# The analysis engine is the project's own package.
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable
+
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
