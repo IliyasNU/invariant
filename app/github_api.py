@@ -184,12 +184,9 @@ def github_webhook(
             source="github_webhook",
             github_delivery_id=github_delivery,
         )
-    except AnalysisNotApplicable:
+    except AnalysisNotApplicable as exc:
         # A docs-only pull request is a normal event, not a failed delivery.
-        response = WebhookResponse(
-            status="not_applicable",
-            detail="The pull request changes no Python files to analyze",
-        )
+        response = WebhookResponse(status="not_applicable", detail=exc.message)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED, content=response.model_dump()
         )

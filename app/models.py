@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -35,15 +36,20 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(String(1000))
     github_owner: Mapped[str | None] = mapped_column(String(100))
     github_repo: Mapped[str | None] = mapped_column(String(100))
+    source_roots: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["."])
+    exclude_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    fail_on: Mapped[str] = mapped_column(String(10), default="error")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # Deleting a project deletes its rules and its whole analysis history; the
+    # database cascades it without loading every row first.
     rules: Mapped[list[Rule]] = relationship(
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
     analysis_runs: Mapped[list[AnalysisRun]] = relationship(
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
 
 
@@ -51,21 +57,35 @@ class Rule(Base):
     __tablename__ = "rules"
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_rules_project_name"),
+        UniqueConstraint("project_id", "key", name="uq_rules_project_key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
+    key: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(120))
     rule_type: Mapped[str] = mapped_column(String(50))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    severity: Mapped[str] = mapped_column(String(10), default="error")
     source_pattern: Mapped[str] = mapped_column(String(255), default="*")
-    forbidden_imports: Mapped[list[str]] = mapped_column(JSON)
+    exclude_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # The fields specific to rule_type, e.g. {"forbidden_imports": [...]}.
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     project: Mapped[Project] = relationship(back_populates="rules")
+
+    @property
+    def forbidden_imports(self) -> list[str] | None:
+        return self.params.get("forbidden_imports")
+
+    @property
+    def max_lines(self) -> int | None:
+        return self.params.get("max_lines")
 
 
 class AnalysisRun(Base):
@@ -95,6 +115,7 @@ class AnalysisRun(Base):
     violations: Mapped[list[AnalysisViolation]] = relationship(
         back_populates="analysis_run",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="AnalysisViolation.id",
     )
 
@@ -109,11 +130,19 @@ class AnalysisViolation(Base):
     rule_id: Mapped[int | None] = mapped_column(
         ForeignKey("rules.id", ondelete="SET NULL"), index=True
     )
-    rule_name: Mapped[str] = mapped_column(String(120))
-    path: Mapped[str] = mapped_column(String(500))
+    # "violation" of a rule, or an "error" that kept a file from being analyzed.
+    kind: Mapped[str] = mapped_column(String(20), default="violation")
+    # The rule type of a violation, or the reason for an error.
+    code: Mapped[str] = mapped_column(String(50))
+    severity: Mapped[str] = mapped_column(String(10), default="error")
+    # Snapshots of the rule as it was when the run happened.
+    rule_key: Mapped[str | None] = mapped_column(String(64))
+    rule_name: Mapped[str | None] = mapped_column(String(120))
+    path: Mapped[str | None] = mapped_column(String(500))
     line: Mapped[int | None] = mapped_column(Integer)
     column: Mapped[int | None] = mapped_column(Integer)
     imported_module: Mapped[str | None] = mapped_column(Text)
     message: Mapped[str] = mapped_column(Text)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     analysis_run: Mapped[AnalysisRun] = relationship(back_populates="violations")

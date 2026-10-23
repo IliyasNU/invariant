@@ -27,6 +27,7 @@ class FakeGitHubClient:
         self.comment_enabled = False
         self.pull_calls = 0
         self.comment_calls = 0
+        self.comments: list[str] = []
         self.error: GitHubAPIError | None = None
         self.comment_error: GitHubAPIError | None = None
         self.files = [
@@ -67,6 +68,7 @@ class FakeGitHubClient:
         self.comment_calls += 1
         if self.comment_error:
             raise self.comment_error
+        self.comments.append(body)
 
 
 @pytest.fixture
@@ -184,6 +186,7 @@ def test_github_analysis_rejects_invalid_python_without_run(client, github):
 
 def test_optional_comment_failure_does_not_fail_analysis(client, github):
     project = create_github_project(client)
+    create_rule(client, project["id"])
     github.comment_enabled = True
     github.comment_error = GitHubAPIError(502, "github_api_error", "Failed")
 
@@ -340,6 +343,58 @@ def test_webhook_checks_signature_before_payload_types(client, github, monkeypat
     )
 
     assert response.status_code == 401
+
+
+def test_excluded_changes_are_not_applicable_rather_than_a_pass(
+    client, github, monkeypatch
+):
+    project = create_github_project(client)
+    create_rule(client, project["id"])
+    client.patch(f"/projects/{project['id']}", json={"exclude_paths": ["app/"]})
+    github.comment_enabled = True
+
+    manual = client.post(
+        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
+    )
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    body = json.dumps(pull_request_payload()).encode()
+    webhook = client.post(
+        "/integrations/github/webhook", content=body, headers=signed_headers(body)
+    )
+
+    assert manual.status_code == 422
+    assert manual.json()["detail"]["code"] == "not_applicable"
+    assert "No enabled rule applies" in manual.json()["detail"]["message"]
+    assert (webhook.status_code, webhook.json()["status"]) == (202, "not_applicable")
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert github.comment_calls == 0
+
+
+def test_pr_comment_lists_warnings_on_a_pass(client, github):
+    project = create_github_project(client)
+    response = client.post(
+        f"/projects/{project['id']}/rules",
+        json={
+            "name": "Domain isolation",
+            "source_pattern": "app.domain.*",
+            "forbidden_imports": ["app.infrastructure"],
+            "severity": "warning",
+        },
+    )
+    assert response.status_code == 201
+    github.comment_enabled = True
+
+    result = client.post(
+        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
+    ).json()
+
+    assert (result["passed"], result["violation_count"]) == (True, 1)
+    [comment] = github.comments
+    assert comment.startswith("Invariant: PASS with 1 warning(s):")
+    assert (
+        "app/domain/service.py:1: warning: app.domain.service must not import"
+        in comment
+    )
 
 
 def test_webhook_signature_validation():

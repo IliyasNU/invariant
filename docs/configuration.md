@@ -6,9 +6,9 @@ already run on it, and the upcoming `invariant check` command reads the file
 format described here. One schema validates the file, API payloads and stored
 rules, so a rule means the same thing everywhere.
 
-Status: the format and every rule type below are implemented in the engine.
-The API still stores only `forbidden_import` rules without severity, exclusions
-or source roots; full API support and configuration import/export come next.
+The API stores the same settings and rules, and can export a project as this
+file or import one (see the README). The `invariant check` command that reads
+it locally comes with the CLI.
 
 ## The configuration file
 
@@ -131,6 +131,8 @@ An analysis has exactly one outcome, decided in this order:
 `passed` is `true` only for `pass`, `false` only for `fail`, and `null`
 otherwise. Warnings never fail the default `fail_on = "error"` threshold but are
 always reported.
+
+Diagnostics are sorted by path, line, column and rule key.
 
 Each diagnostic is either a `violation` of a rule or an `error` that kept a
 file from being analyzed. Both carry `code` (the rule type, or a reason such as

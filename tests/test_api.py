@@ -330,3 +330,18 @@ def test_stored_text_rejects_control_characters(client):
     rule = {"name": "r\u0000", "forbidden_imports": ["fastapi"]}
     assert client.post(f"/projects/{project_id}/rules", json=rule).status_code == 422
     assert client.get("/projects").json() == [project.json()]
+
+
+def test_openapi_document_describes_every_rule_type(client):
+    spec = client.get("/openapi.json").json()
+
+    body = spec["paths"]["/projects/{project_id}/rules"]["post"]["requestBody"]
+    schemas = body["content"]["application/json"]["schema"]["oneOf"]
+    assert [item["$ref"].rsplit("/", 1)[1] for item in schemas] == [
+        "ForbiddenImportRuleCreate",
+        "NoRelativeImportRuleCreate",
+        "MaxFileLinesRuleCreate",
+    ]
+    export = spec["paths"]["/projects/{project_id}/config"]["get"]["responses"]["200"]
+    assert list(export["content"]) == ["application/toml"]
+    assert client.get("/docs").status_code == 200

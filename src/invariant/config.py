@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
@@ -60,6 +61,14 @@ def _source_root(value: str) -> str:
         raise ValueError(str(exc)) from exc
 
 
+def _non_overlapping_roots(value: list[str]) -> list[str]:
+    try:
+        SourceRoots(value)
+    except PathError as exc:
+        raise ValueError(str(exc)) from exc
+    return value
+
+
 def _rule_key(value: str) -> str:
     if not RULE_KEY.fullmatch(value):
         raise ValueError(
@@ -79,6 +88,12 @@ ModuleName = Annotated[str, AfterValidator(_module_name)]
 ModuleGlob = Annotated[str, Field(max_length=255), AfterValidator(_module_glob)]
 PathGlob = Annotated[str, Field(max_length=500), AfterValidator(_path_glob)]
 SourceRoot = Annotated[str, Field(max_length=500), AfterValidator(_source_root)]
+SourceRootList = Annotated[
+    list[SourceRoot],
+    Field(min_length=1, max_length=50),
+    AfterValidator(_non_overlapping_roots),
+]
+PathGlobList = Annotated[list[PathGlob], Field(max_length=200)]
 RuleKey = Annotated[str, AfterValidator(_rule_key)]
 DisplayName = Annotated[
     str, Field(min_length=1, max_length=120), AfterValidator(_display_name)
@@ -134,24 +149,14 @@ RuleConfig = Annotated[
     ForbiddenImportRule | NoRelativeImportRule | MaxFileLinesRule,
     Field(discriminator="rule_type"),
 ]
+RULES = TypeAdapter(RuleConfig)
 
 
 class ProjectSettings(_Model):
-    source_roots: list[SourceRoot] = Field(
-        default_factory=lambda: ["."], min_length=1, max_length=50
-    )
-    exclude_paths: list[PathGlob] = Field(default_factory=list, max_length=200)
+    source_roots: SourceRootList = Field(default_factory=lambda: ["."])
+    exclude_paths: PathGlobList = Field(default_factory=list)
     # Violations of this severity or worse fail the check.
     fail_on: Severity = "error"
-
-    @field_validator("source_roots")
-    @classmethod
-    def roots_do_not_overlap(cls, value: list[str]) -> list[str]:
-        try:
-            SourceRoots(value)
-        except PathError as exc:
-            raise ValueError(str(exc)) from exc
-        return value
 
 
 class InvariantConfig(_Model):
@@ -276,3 +281,66 @@ def discover_config(directory: Path) -> Path | None:
     if config_file.is_file():
         return config_file
     return pyproject if in_pyproject else None
+
+
+_COMMON_RULE_FIELDS = (
+    "key",
+    "name",
+    "rule_type",
+    "enabled",
+    "severity",
+    "source_pattern",
+    "exclude_paths",
+)
+
+
+def _toml_string(value: str) -> str:
+    escaped = []
+    for character in value:
+        if character in '"\\':
+            escaped.append("\\" + character)
+        elif character == "\n":
+            escaped.append("\\n")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif ord(character) < 0x20 or ord(character) == 0x7F:
+            escaped.append(f"\\u{ord(character):04x}")
+        else:
+            escaped.append(character)
+    return '"' + "".join(escaped) + '"'
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return _toml_string(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise TypeError(f"cannot write {type(value).__name__} to TOML")
+
+
+def dump_config(config: InvariantConfig) -> str:
+    """Write a configuration as ``invariant.toml`` text that reads back unchanged.
+
+    Every field is written, defaults included, so the file states exactly what
+    is checked.
+    """
+    lines = [f"version = {config.version}", "", "[project]"]
+    project = config.project.model_dump()
+    lines += [f"{field} = {_toml_value(value)}" for field, value in project.items()]
+    for rule in config.rules:
+        data = rule.model_dump()
+        data["name"] = rule.display_name
+        lines += ["", "[[rules]]"]
+        lines += [
+            f"{field} = {_toml_value(data[field])}" for field in _COMMON_RULE_FIELDS
+        ]
+        lines += [
+            f"{field} = {_toml_value(value)}"
+            for field, value in data.items()
+            if field not in _COMMON_RULE_FIELDS
+        ]
+    return "\n".join(lines) + "\n"
