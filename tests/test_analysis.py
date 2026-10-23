@@ -6,10 +6,14 @@ from app.schemas import SourceFile
 
 DOMAIN_RULE = Rule(
     id=1,
+    key="domain-isolation",
     name="Domain isolation",
     rule_type="forbidden_import",
+    enabled=True,
+    severity="error",
     source_pattern="app.domain.*",
-    forbidden_imports=["app.infrastructure"],
+    exclude_paths=[],
+    params={"forbidden_imports": ["app.infrastructure"]},
 )
 
 

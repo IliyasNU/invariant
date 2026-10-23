@@ -105,7 +105,7 @@ def analysis_not_applicable_handler(
         content={
             "detail": {
                 "code": "not_applicable",
-                "message": "The pull request changes no Python files to analyze",
+                "message": exc.message,
                 "ignored_files": exc.ignored,
             }
         },

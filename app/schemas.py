@@ -1,20 +1,33 @@
 import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     StringConstraints,
+    Tag,
     field_validator,
     model_validator,
 )
 
+from invariant.config import (
+    DisplayName,
+    ForbiddenImportRule,
+    MaxFileLinesRule,
+    ModuleGlob,
+    ModuleName,
+    NoRelativeImportRule,
+    PathGlob,
+    PathGlobList,
+    RuleKey,
+    Severity,
+    SourceRootList,
+)
 from invariant.paths import PathError, normalize_path
 
-MODULE_NAME = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
-SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_.*?\[\]-]+$")
 GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 # PostgreSQL cannot store NUL, and other control characters only break output.
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -45,6 +58,9 @@ class ProjectCreate(APIModel):
     description: str | None = Field(default=None, max_length=1000)
     github_owner: str | None = Field(default=None, min_length=1, max_length=100)
     github_repo: str | None = Field(default=None, min_length=1, max_length=100)
+    source_roots: SourceRootList = Field(default_factory=lambda: ["."])
+    exclude_paths: PathGlobList = Field(default_factory=list)
+    fail_on: Severity = "error"
 
     @field_validator("name")
     @classmethod
@@ -69,9 +85,25 @@ class ProjectCreate(APIModel):
 
 
 class ProjectUpdate(APIModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
     github_owner: str | None = Field(default=None, min_length=1, max_length=100)
     github_repo: str | None = Field(default=None, min_length=1, max_length=100)
+    source_roots: SourceRootList | None = None
+    exclude_paths: PathGlobList | None = None
+    fail_on: Severity | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return _reject_control_characters(value)
+
+    @model_validator(mode="after")
+    def required_fields_are_not_cleared(self) -> ProjectUpdate:
+        for field in ("name", "source_roots", "exclude_paths", "fail_on"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
 
     @field_validator("description")
     @classmethod
@@ -102,35 +134,67 @@ class ProjectResponse(APIModel):
     description: str | None
     github_owner: str | None
     github_repo: str | None
+    source_roots: list[str]
+    exclude_paths: list[str]
+    fail_on: str
     created_at: datetime
 
 
-class RuleCreate(APIModel):
-    name: str = Field(min_length=1, max_length=120)
+# Rules are validated by the engine's own models. On create, the key may be
+# left out (it is derived from the name) and rule_type defaults to
+# forbidden_import, as in v0.2.
+
+
+class ForbiddenImportRuleCreate(ForbiddenImportRule):
     rule_type: Literal["forbidden_import"] = "forbidden_import"
-    source_pattern: str = Field(default="*", min_length=1, max_length=255)
-    forbidden_imports: list[str] = Field(min_length=1, max_length=100)
+    key: RuleKey | None = None
 
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, value: str) -> str:
-        return _reject_control_characters(value)
 
-    @field_validator("source_pattern")
-    @classmethod
-    def validate_source_pattern(cls, value: str) -> str:
-        if not SOURCE_PATTERN.fullmatch(value):
-            raise ValueError("must be a dotted module glob such as 'app.services.*'")
-        return value
+class NoRelativeImportRuleCreate(NoRelativeImportRule):
+    key: RuleKey | None = None
 
-    @field_validator("forbidden_imports")
-    @classmethod
-    def validate_forbidden_imports(cls, value: list[str]) -> list[str]:
-        if any(not MODULE_NAME.fullmatch(item) for item in value):
-            raise ValueError("entries must be dotted Python module names")
-        if len(set(value)) != len(value):
-            raise ValueError("entries must be unique")
-        return value
+
+class MaxFileLinesRuleCreate(MaxFileLinesRule):
+    key: RuleKey | None = None
+
+
+def _rule_type(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("rule_type", "forbidden_import")
+    return getattr(value, "rule_type", None)
+
+
+RuleCreate = Annotated[
+    Annotated[ForbiddenImportRuleCreate, Tag("forbidden_import")]
+    | Annotated[NoRelativeImportRuleCreate, Tag("no_relative_import")]
+    | Annotated[MaxFileLinesRuleCreate, Tag("max_file_lines")],
+    Discriminator(_rule_type),
+]
+
+
+class RuleUpdate(BaseModel):
+    """Fields to change; the merged rule is validated again as a whole.
+
+    The rule type cannot change: delete the rule and create a new one.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    key: RuleKey | None = None
+    name: DisplayName | None = None
+    enabled: bool | None = None
+    severity: Severity | None = None
+    source_pattern: ModuleGlob | None = None
+    exclude_paths: list[PathGlob] | None = None
+    forbidden_imports: list[ModuleName] | None = None
+    max_lines: int | None = None
+
+    @model_validator(mode="after")
+    def fields_are_not_cleared(self) -> RuleUpdate:
+        for field in self.model_fields_set:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
 
 
 class RuleResponse(APIModel):
@@ -138,10 +202,17 @@ class RuleResponse(APIModel):
 
     id: int
     project_id: int
+    key: str
     name: str
     rule_type: str
+    enabled: bool
+    severity: str
     source_pattern: str
-    forbidden_imports: list[str]
+    exclude_paths: list[str]
+    # Set for forbidden_import rules.
+    forbidden_imports: list[str] | None
+    # Set for max_file_lines rules.
+    max_lines: int | None
     created_at: datetime
 
 
@@ -204,15 +275,27 @@ class AnalysisRunSummaryResponse(APIModel):
     created_at: datetime
 
 
-class PersistedViolationResponse(ViolationResponse):
+class PersistedViolationResponse(APIModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     analysis_run_id: int
+    # "violation" of a rule, or an "error" that kept a file from being analyzed.
+    kind: str
+    # The rule type of a violation, or the reason for an error.
+    code: str
+    severity: str
     rule_id: int | None
+    # The rule's key and name when the run happened.
+    rule_key: str | None
+    rule_name: str | None
+    path: str | None
     line: int | None
     column: int | None
+    # Set for forbidden_import violations.
     imported_module: str | None
+    message: str
+    data: dict[str, Any]
 
 
 class AnalysisRunResponse(AnalysisRunSummaryResponse):

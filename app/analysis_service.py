@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.analysis import analyze_files
+from app.analysis import evaluate
 from app.github import GitHubAPIError, GitHubClient, SkippedFile
 from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import SourceFile
+from invariant.result import AnalysisResult, Outcome
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +27,63 @@ class AnalysisIncomplete(Exception):
 
 @dataclass
 class AnalysisNotApplicable(Exception):
-    """The pull request changes no Python files, so there is nothing to verify."""
+    """Nothing in the pull request is checked, so there is nothing to verify."""
 
     ignored: int
+    message: str = "The pull request changes no Python files to analyze"
+
+
+def _project_rules(db: Session, project: Project) -> list[Rule]:
+    statement = select(Rule).where(Rule.project_id == project.id).order_by(Rule.id)
+    return list(db.scalars(statement))
+
+
+def _record_run(
+    db: Session,
+    project: Project,
+    rules: list[Rule],
+    result: AnalysisResult,
+    *,
+    source: str,
+    pull_number: int | None,
+    github_delivery_id: str | None,
+) -> AnalysisRun:
+    rule_ids = {rule.key: rule.id for rule in rules}
+    run = AnalysisRun(
+        project_id=project.id,
+        source=source,
+        status="completed",
+        # Warnings below the project's fail_on threshold do not fail a run.
+        passed=result.outcome is not Outcome.FAIL,
+        pull_number=pull_number,
+        repository_owner=project.github_owner,
+        repository_name=project.github_repo,
+        github_delivery_id=github_delivery_id,
+        files_analyzed=result.files.analyzed,
+        rules_evaluated=result.rules_enabled,
+        violation_count=len(result.violations),
+        violations=[
+            AnalysisViolation(
+                kind=item.kind,
+                code=item.code,
+                severity=item.severity,
+                rule_id=rule_ids.get(item.rule_key),
+                rule_key=item.rule_key,
+                rule_name=item.rule_name,
+                path=item.path,
+                line=item.line,
+                column=item.column,
+                imported_module=item.data.get("imported_module"),
+                message=item.message,
+                data=item.data,
+            )
+            for item in result.violations
+        ],
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 def persist_analysis(
@@ -40,39 +95,16 @@ def persist_analysis(
     pull_number: int | None = None,
     github_delivery_id: str | None = None,
 ) -> AnalysisRun:
-    statement = select(Rule).where(Rule.project_id == project.id).order_by(Rule.id)
-    rules = list(db.scalars(statement))
-    violations = analyze_files(files, rules)
-
-    run = AnalysisRun(
-        project_id=project.id,
+    rules = _project_rules(db, project)
+    return _record_run(
+        db,
+        project,
+        rules,
+        evaluate(files, rules, project),
         source=source,
-        status="completed",
-        passed=not violations,
         pull_number=pull_number,
-        repository_owner=project.github_owner,
-        repository_name=project.github_repo,
         github_delivery_id=github_delivery_id,
-        files_analyzed=len(files),
-        rules_evaluated=len(rules),
-        violation_count=len(violations),
-        violations=[
-            AnalysisViolation(
-                rule_id=violation.rule_id,
-                rule_name=violation.rule_name,
-                path=violation.path,
-                line=violation.line,
-                column=violation.column,
-                imported_module=violation.imported_module,
-                message=violation.message,
-            )
-            for violation in violations
-        ],
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
 
 
 def analyze_github_pull_request(
@@ -99,10 +131,20 @@ def analyze_github_pull_request(
         raise AnalysisIncomplete(skipped=changed.skipped, truncated=changed.truncated)
     if not changed.files:
         raise AnalysisNotApplicable(ignored=changed.ignored)
-    run = persist_analysis(
+    rules = _project_rules(db, project)
+    result = evaluate(changed.files, rules, project)
+    # Excluded files, or rules that apply to none of them: a PASS would claim a
+    # check that never ran.
+    if result.outcome is Outcome.NOT_APPLICABLE:
+        raise AnalysisNotApplicable(
+            ignored=changed.ignored + result.files.excluded,
+            message="No enabled rule applies to the changed Python files",
+        )
+    run = _record_run(
         db,
         project,
-        changed.files,
+        rules,
+        result,
         source=source,
         pull_number=pull_request.number,
         github_delivery_id=github_delivery_id,
@@ -120,14 +162,22 @@ def _post_feedback(github: GitHubClient, project: Project, run: AnalysisRun) -> 
     ):
         return
 
-    if run.passed:
+    items = [
+        f"- {violation.path}:{violation.line or '?'}: "
+        + ("warning: " if violation.severity == "warning" else "")
+        + violation.message
+        for violation in run.violations[:10]
+    ]
+    suffix = "\n- …" if run.violation_count > 10 else ""
+    if run.passed and not items:
         body = "Invariant: PASS"
+    elif run.passed:
+        body = (
+            f"Invariant: PASS with {run.violation_count} warning(s):\n\n"
+            + "\n".join(items)
+            + suffix
+        )
     else:
-        items = [
-            f"- {violation.path}:{violation.line or '?'}: {violation.message}"
-            for violation in run.violations[:10]
-        ]
-        suffix = "\n- …" if run.violation_count > 10 else ""
         body = (
             f"Invariant found {run.violation_count} architecture violation(s):\n\n"
             + "\n".join(items)

@@ -1,11 +1,25 @@
-"""Run the shared engine on API and GitHub input with the v0.2 result contract."""
+"""Run the shared engine on stored projects and rules."""
 
 from dataclasses import dataclass
+from typing import Any
 
-from app.models import Rule
+from app.models import Project, Rule
 from app.schemas import SourceFile, ViolationResponse
-from invariant.config import ForbiddenImportRule
+from invariant.config import (
+    ForbiddenImportRule,
+    MaxFileLinesRule,
+    NoRelativeImportRule,
+    ProjectSettings,
+    RuleConfig,
+)
 from invariant.engine import Source, analyze
+from invariant.result import AnalysisResult
+
+_RULE_MODELS = {
+    "forbidden_import": ForbiddenImportRule,
+    "no_relative_import": NoRelativeImportRule,
+    "max_file_lines": MaxFileLinesRule,
+}
 
 
 @dataclass
@@ -16,32 +30,61 @@ class SourceSyntaxError(Exception):
     message: str
 
 
-def _engine_rule(rule: Rule) -> ForbiddenImportRule:
+_COMMON_RULE_FIELDS = (
+    "key",
+    "name",
+    "rule_type",
+    "enabled",
+    "severity",
+    "source_pattern",
+    "exclude_paths",
+)
+
+
+def rule_columns(rule: RuleConfig) -> dict[str, Any]:
+    """The table columns that store a validated engine rule."""
+    data = rule.model_dump()
+    columns = {field: data.pop(field) for field in _COMMON_RULE_FIELDS}
+    columns["name"] = rule.display_name
+    columns["params"] = data
+    return columns
+
+
+def rule_data(rule: Rule) -> dict[str, Any]:
+    """A stored rule as the plain data an engine rule is validated from."""
+    return {
+        **{field: getattr(rule, field) for field in _COMMON_RULE_FIELDS},
+        "exclude_paths": list(rule.exclude_paths),
+        **rule.params,
+    }
+
+
+def engine_rule(rule: Rule) -> RuleConfig:
     # Stored rules were validated when written; constructing them without
     # validation keeps rules saved under older checks usable.
-    return ForbiddenImportRule.model_construct(
-        rule_type="forbidden_import",
-        key=f"rule-{rule.id}",
-        name=rule.name,
-        enabled=True,
-        severity="error",
-        source_pattern=rule.source_pattern,
-        exclude_paths=[],
-        forbidden_imports=list(rule.forbidden_imports),
+    return _RULE_MODELS[rule.rule_type].model_construct(**rule_data(rule))
+
+
+def project_settings(project: Project | None) -> ProjectSettings:
+    if project is None:
+        return ProjectSettings()
+    return ProjectSettings.model_construct(
+        source_roots=list(project.source_roots),
+        exclude_paths=list(project.exclude_paths),
+        fail_on=project.fail_on,
     )
 
 
-def analyze_files(
-    files: list[SourceFile], rules: list[Rule]
-) -> list[ViolationResponse]:
-    applicable = [rule for rule in rules if rule.rule_type == "forbidden_import"]
-    by_key = {f"rule-{rule.id}": rule for rule in applicable}
+def evaluate(
+    files: list[SourceFile], rules: list[Rule], project: Project | None = None
+) -> AnalysisResult:
     result = analyze(
         [Source(path=item.path, content=item.content) for item in files],
-        [_engine_rule(rule) for rule in applicable],
+        [engine_rule(rule) for rule in rules],
+        project_settings(project),
     )
-    # v0.2 has no incomplete result: a file that cannot be parsed rejects the
-    # whole request, as before.
+    # The API has no incomplete result yet: a file that cannot be parsed
+    # rejects the whole request.
     if result.errors:
         error = result.errors[0]
         raise SourceSyntaxError(
@@ -50,10 +93,19 @@ def analyze_files(
             column=error.column,
             message=error.message,
         )
+    return result
+
+
+def analyze_files(
+    files: list[SourceFile], rules: list[Rule]
+) -> list[ViolationResponse]:
+    """The forbidden-import violations of ``files``, in the v0.2 order."""
+    by_key = {rule.key: rule for rule in rules}
+    result = evaluate(files, rules)
     violations = [
         ViolationResponse(
             rule_id=by_key[item.rule_key].id,
-            rule_name=by_key[item.rule_key].name,
+            rule_name=item.rule_name,
             path=item.path,
             line=item.line,
             column=item.column,
@@ -61,6 +113,7 @@ def analyze_files(
             message=item.message,
         )
         for item in result.violations
+        if item.code == "forbidden_import"
     ]
     return sorted(
         violations,
