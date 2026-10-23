@@ -14,7 +14,9 @@ from pydantic import (
 )
 
 from invariant.config import (
+    CallName,
     DisplayName,
+    ForbiddenCallRule,
     ForbiddenImportRule,
     MaxFileLinesRule,
     ModuleGlob,
@@ -150,6 +152,10 @@ class ForbiddenImportRuleCreate(ForbiddenImportRule):
     key: RuleKey | None = None
 
 
+class ForbiddenCallRuleCreate(ForbiddenCallRule):
+    key: RuleKey | None = None
+
+
 class NoRelativeImportRuleCreate(NoRelativeImportRule):
     key: RuleKey | None = None
 
@@ -166,6 +172,7 @@ def _rule_type(value: Any) -> str | None:
 
 RuleCreate = Annotated[
     Annotated[ForbiddenImportRuleCreate, Tag("forbidden_import")]
+    | Annotated[ForbiddenCallRuleCreate, Tag("forbidden_call")]
     | Annotated[NoRelativeImportRuleCreate, Tag("no_relative_import")]
     | Annotated[MaxFileLinesRuleCreate, Tag("max_file_lines")],
     Discriminator(_rule_type),
@@ -187,6 +194,7 @@ class RuleUpdate(BaseModel):
     source_pattern: ModuleGlob | None = None
     exclude_paths: list[PathGlob] | None = None
     forbidden_imports: list[ModuleName] | None = None
+    forbidden_calls: list[CallName] | None = None
     max_lines: int | None = None
 
     @model_validator(mode="after")
@@ -211,6 +219,8 @@ class RuleResponse(APIModel):
     exclude_paths: list[str]
     # Set for forbidden_import rules.
     forbidden_imports: list[str] | None
+    # Set for forbidden_call rules.
+    forbidden_calls: list[str] | None
     # Set for max_file_lines rules.
     max_lines: int | None
     created_at: datetime

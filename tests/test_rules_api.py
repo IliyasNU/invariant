@@ -145,6 +145,9 @@ def test_rules_of_every_type_can_be_created(client):
         {"name": "x", "rule_type": "max_file_lines", "max_lines": 0},
         {"name": "x", "rule_type": "max_file_lines"},
         {"name": "x", "rule_type": "no_relative_import", "forbidden_imports": ["a"]},
+        {"name": "x", "rule_type": "forbidden_call"},
+        {"name": "x", "rule_type": "forbidden_call", "forbidden_calls": ["os system"]},
+        {"name": "x", "rule_type": "forbidden_call", "forbidden_imports": ["os"]},
         {"name": "x", "key": "Bad Key", "forbidden_imports": ["app.db"]},
         {"name": "x", "forbidden_imports": ["app.db"], "severty": "warning"},
     ],
@@ -307,3 +310,44 @@ def test_stored_violations_carry_diagnostic_fields(client):
         "imported_module": "app.infrastructure",
         "forbidden": "app.infrastructure",
     }
+
+
+def test_forbidden_call_rules_are_managed_and_analyzed(client):
+    project = create_project(client)
+    rule = create_rule(
+        client,
+        project["id"],
+        name="No shell",
+        rule_type="forbidden_call",
+        forbidden_calls=["os.system", "subprocess"],
+    )
+    url = f"/projects/{project['id']}/rules/{rule['id']}"
+
+    assert (rule["key"], rule["forbidden_calls"], rule["forbidden_imports"]) == (
+        "no-shell",
+        ["os.system", "subprocess"],
+        None,
+    )
+    changed = client.patch(url, json={"forbidden_calls": ["builtins.eval"]})
+    assert changed.status_code == 200
+    assert changed.json()["forbidden_calls"] == ["builtins.eval"]
+    assert client.patch(url, json={"forbidden_imports": ["os"]}).status_code == 422
+    assert client.patch(url, json={"forbidden_calls": []}).status_code == 422
+
+    run = analyze(
+        client,
+        project["id"],
+        {
+            "app/a.py": "import builtins as b\nb.eval('1')\ndef f(eval):\n    eval('2')\n"
+        },
+    )
+
+    assert run["passed"] is False
+    [violation] = client.get(f"/analysis-runs/{run['id']}").json()["violations"]
+    assert (violation["code"], violation["line"], violation["column"]) == (
+        "forbidden_call",
+        2,
+        1,
+    )
+    assert violation["data"] == {"call": "builtins.eval", "forbidden": "builtins.eval"}
+    assert violation["imported_module"] is None

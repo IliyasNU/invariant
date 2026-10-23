@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from functools import cached_property
 
+from invariant.calls import ResolvedCall, resolve_calls
 from invariant.config import (
+    ForbiddenCallRule,
     ForbiddenImportRule,
     MaxFileLinesRule,
     NoRelativeImportRule,
     RuleConfig,
 )
-from invariant.paths import matches_any
+from invariant.paths import absolute_module, matches_any
 from invariant.result import Diagnostic
 
 # The line breaks Python's tokenizer recognises; str.splitlines() knows more.
@@ -31,6 +33,11 @@ class ParsedFile:
     @cached_property
     def lines(self) -> list[str]:
         return LINE_BREAK.split(self.source)
+
+    @cached_property
+    def calls(self) -> list[ResolvedCall]:
+        # Resolved once for all the forbidden_call rules checking this file.
+        return resolve_calls(self.tree, self.package)
 
     def column(self, node: ast.stmt | ast.expr) -> int:
         """The 1-based character column of a node; ``ast`` counts UTF-8 bytes."""
@@ -63,23 +70,12 @@ def rule_applies(rule: RuleConfig, module: str, path: str) -> bool:
     )
 
 
-def absolute_module(
-    package: tuple[str, ...], level: int, module: str | None
-) -> str | None:
-    """Resolve ``from <level dots><module> import ...`` as Python's importer does.
-
-    Returns None for a relative import that climbs above the top-level package.
-    """
-    if level == 0:
-        return module
-    keep = len(package) - (level - 1)
-    if keep < 1:
-        return None
-    return ".".join([*package[:keep], *([module] if module else [])])
-
-
 def _violation(
-    rule: RuleConfig, file: ParsedFile, node: ast.stmt, message: str, **data: object
+    rule: RuleConfig,
+    file: ParsedFile,
+    node: ast.stmt | ast.expr,
+    message: str,
+    **data: object,
 ) -> Diagnostic:
     return Diagnostic(
         kind="violation",
@@ -142,6 +138,23 @@ def check_forbidden_import(
     return found
 
 
+def check_forbidden_call(rule: ForbiddenCallRule, file: ParsedFile) -> list[Diagnostic]:
+    found: list[Diagnostic] = []
+    for call in file.calls:
+        if forbidden := _forbidden_match(call.target, rule.forbidden_calls):
+            found.append(
+                _violation(
+                    rule,
+                    file,
+                    call.node,
+                    f"{file.module} must not call {forbidden} (called {call.target})",
+                    call=call.target,
+                    forbidden=forbidden,
+                )
+            )
+    return found
+
+
 def check_no_relative_import(
     rule: NoRelativeImportRule, file: ParsedFile
 ) -> list[Diagnostic]:
@@ -186,6 +199,7 @@ def check_max_file_lines(rule: MaxFileLinesRule, file: ParsedFile) -> list[Diagn
 
 CHECKERS: dict[str, Callable[..., list[Diagnostic]]] = {
     "forbidden_import": check_forbidden_import,
+    "forbidden_call": check_forbidden_call,
     "no_relative_import": check_no_relative_import,
     "max_file_lines": check_max_file_lines,
 }

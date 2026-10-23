@@ -339,6 +339,7 @@ def test_openapi_document_describes_every_rule_type(client):
     schemas = body["content"]["application/json"]["schema"]["oneOf"]
     assert [item["$ref"].rsplit("/", 1)[1] for item in schemas] == [
         "ForbiddenImportRuleCreate",
+        "ForbiddenCallRuleCreate",
         "NoRelativeImportRuleCreate",
         "MaxFileLinesRuleCreate",
     ]

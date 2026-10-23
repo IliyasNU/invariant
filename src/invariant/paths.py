@@ -121,3 +121,18 @@ class SourceRoots:
             # imports resolve against the directory that holds the file.
             return ModuleLocation(module=module, package=tuple(parts[:-1]))
         return None
+
+
+def absolute_module(
+    package: tuple[str, ...], level: int, module: str | None
+) -> str | None:
+    """Resolve ``from <level dots><module> import ...`` as Python's importer does.
+
+    Returns None for a relative import that climbs above the top-level package.
+    """
+    if level == 0:
+        return module
+    keep = len(package) - (level - 1)
+    if keep < 1:
+        return None
+    return ".".join([*package[:keep], *([module] if module else [])])

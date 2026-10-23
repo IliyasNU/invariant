@@ -84,6 +84,10 @@ class Rule(Base):
         return self.params.get("forbidden_imports")
 
     @property
+    def forbidden_calls(self) -> list[str] | None:
+        return self.params.get("forbidden_calls")
+
+    @property
     def max_lines(self) -> int | None:
         return self.params.get("max_lines")
 
