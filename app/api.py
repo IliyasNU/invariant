@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy import Select, func, select
@@ -12,6 +12,7 @@ from app.analysis import rule_columns, rule_data
 from app.analysis_service import load_analysis_run, persist_analysis, result_document
 from app.config_service import SOURCE, apply_import, export_config, plan_import
 from app.database import get_db
+from app.errors import APIError
 from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import (
     AnalysisRequest,
@@ -36,7 +37,14 @@ from invariant.config import RULES, ConfigError, RuleConfig, parse_config
 
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_db)]
-RULE_CONFLICT = "A rule with this key or name already exists in the project"
+RULE_CONFLICT = (
+    "rule_conflict",
+    "A rule with this key or name already exists in the project",
+)
+PROJECT_CONFLICT = (
+    "project_conflict",
+    "A project with this name or GitHub repository already exists",
+)
 
 TOTAL_COUNT = "X-Total-Count"
 PAGINATED: dict[int | str, dict[str, Any]] = {
@@ -68,7 +76,7 @@ def _page(
 def _project_or_404(project_id: int, db: Session) -> Project:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise APIError(404, "project_not_found", "Project not found")
     return project
 
 
@@ -77,7 +85,7 @@ def _rule_or_404(project_id: int, rule_id: int, db: Session) -> Rule:
     rule = db.get(Rule, rule_id)
     # A rule is only reachable through its own project.
     if rule is None or rule.project_id != project_id:
-        raise HTTPException(status_code=404, detail="Rule not found")
+        raise APIError(404, "rule_not_found", "Rule not found")
     return rule
 
 
@@ -102,12 +110,12 @@ def _validated_rule(data: dict[str, Any]) -> RuleConfig:
         raise RequestValidationError(errors) from exc
 
 
-def _commit(db: Session, conflict: str) -> None:
+def _commit(db: Session, conflict: tuple[str, str]) -> None:
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail=conflict) from exc
+        raise APIError(409, *conflict) from exc
 
 
 @router.post(
@@ -116,14 +124,7 @@ def _commit(db: Session, conflict: str) -> None:
 def create_project(payload: ProjectCreate, db: DatabaseSession) -> Project:
     project = Project(**payload.model_dump())
     db.add(project)
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="A project with this name or GitHub repository already exists",
-        ) from exc
+    _commit(db, PROJECT_CONFLICT)
     db.refresh(project)
     return project
 
@@ -147,7 +148,7 @@ def update_project(
     project = _project_or_404(project_id, db)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(project, field, value)
-    _commit(db, "A project with this name or GitHub repository already exists")
+    _commit(db, PROJECT_CONFLICT)
     db.refresh(project)
     return project
 
@@ -265,16 +266,14 @@ def import_project_config(
         config = parse_config(payload.content, source=SOURCE)
         plan = plan_import(project, rules, config, payload.mode)
     except ConfigError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "invalid_config",
-                "message": "The configuration cannot be imported",
-                "problems": [
-                    {"location": location, "message": message}
-                    for location, message in exc.problems
-                ],
-            },
+        raise APIError(
+            422,
+            "invalid_config",
+            "The configuration cannot be imported",
+            fields=[
+                {"location": location, "message": message}
+                for location, message in exc.problems
+            ],
         ) from exc
     if not payload.dry_run:
         apply_import(db, project, plan)
@@ -428,7 +427,7 @@ def list_diagnostics(
 ) -> list[AnalysisViolation]:
     """A run's diagnostics in the engine's order: path, line, column, rule key."""
     if db.get(AnalysisRun, analysis_run_id) is None:
-        raise HTTPException(status_code=404, detail="Analysis run not found")
+        raise APIError(404, "analysis_run_not_found", "Analysis run not found")
     statement = select(AnalysisViolation).where(
         AnalysisViolation.analysis_run_id == analysis_run_id
     )
@@ -461,5 +460,5 @@ def get_analysis_result(analysis_run_id: int, db: DatabaseSession) -> dict[str, 
 def _run_or_404(analysis_run_id: int, db: Session) -> AnalysisRun:
     run = load_analysis_run(db, analysis_run_id)
     if run is None:
-        raise HTTPException(status_code=404, detail="Analysis run not found")
+        raise APIError(404, "analysis_run_not_found", "Analysis run not found")
     return run

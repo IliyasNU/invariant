@@ -1,7 +1,8 @@
 import json
+import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.analysis_service import enqueue_github_analysis
 from app.config import Settings
 from app.database import get_db
+from app.errors import APIError
 from app.github import verify_webhook_signature
 from app.models import AnalysisRun, Project
 from app.schemas import (
@@ -20,6 +22,7 @@ from app.schemas import (
     WebhookResponse,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_db)]
 
@@ -34,7 +37,7 @@ RawBody = Annotated[bytes, Depends(raw_request_body)]
 def _project_or_404(project_id: int, db: Session) -> Project:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise APIError(404, "project_not_found", "Project not found")
     return project
 
 
@@ -71,22 +74,16 @@ def github_webhook(
 ) -> WebhookResponse | JSONResponse:
     settings = Settings()
     if not settings.github_webhook_secret:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "github_webhook_not_configured",
-                "message": "GITHUB_WEBHOOK_SECRET is not configured",
-            },
+        raise APIError(
+            503,
+            "github_webhook_not_configured",
+            "GITHUB_WEBHOOK_SECRET is not configured",
         )
     if not verify_webhook_signature(
         body, github_signature, settings.github_webhook_secret
     ):
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "code": "invalid_github_signature",
-                "message": "GitHub webhook signature is invalid",
-            },
+        raise APIError(
+            401, "invalid_github_signature", "GitHub webhook signature is invalid"
         )
 
     if github_event != "pull_request":
@@ -98,28 +95,17 @@ def github_webhook(
     try:
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "invalid_webhook_payload", "message": "Invalid JSON"},
-        ) from exc
+        raise APIError(400, "invalid_webhook_payload", "Invalid JSON") from exc
 
     if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "invalid_webhook_payload",
-                "message": "Webhook payload must be an object",
-            },
+        raise APIError(
+            400, "invalid_webhook_payload", "Webhook payload must be an object"
         )
 
     action = payload.get("action")
     if not isinstance(action, str):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "invalid_webhook_payload",
-                "message": "Pull request action must be a string",
-            },
+        raise APIError(
+            400, "invalid_webhook_payload", "Pull request action must be a string"
         )
     if action not in {"opened", "synchronize", "reopened"}:
         response = WebhookResponse(
@@ -130,12 +116,10 @@ def github_webhook(
         )
 
     if not github_delivery or len(github_delivery) > 100:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "missing_github_delivery",
-                "message": "A valid X-GitHub-Delivery header is required",
-            },
+        raise APIError(
+            400,
+            "missing_github_delivery",
+            "A valid X-GitHub-Delivery header is required",
         )
 
     existing = db.scalar(
@@ -147,12 +131,10 @@ def github_webhook(
     try:
         event = PullRequestEvent.model_validate(payload)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "invalid_webhook_payload",
-                "message": "Repository or pull request metadata is missing or invalid",
-            },
+        raise APIError(
+            400,
+            "invalid_webhook_payload",
+            "Repository or pull request metadata is missing or invalid",
         ) from exc
     owner = event.repository.owner.login.lower()
     repo = event.repository.name.lower()
@@ -165,12 +147,10 @@ def github_webhook(
         )
     )
     if project is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "github_project_not_found",
-                "message": "No Invariant project is configured for this repository",
-            },
+        raise APIError(
+            404,
+            "github_project_not_found",
+            "No Invariant project is configured for this repository",
         )
 
     # Committed before the reply: once GitHub sees 202, the job survives a
@@ -197,6 +177,12 @@ def github_webhook(
 
 def _duplicate(run: AnalysisRun) -> JSONResponse:
     # A repeated delivery gets the run its first delivery queued.
+    logger.info(
+        "Delivery %s repeated; run %s",
+        run.github_delivery_id,
+        run.id,
+        extra={"event": "delivery_duplicate", "run_id": run.id},
+    )
     response = WebhookResponse(
         status="duplicate", analysis_run_id=run.id, outcome=run.outcome
     )

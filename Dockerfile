@@ -28,4 +28,7 @@ RUN useradd --create-home invariant && chown -R invariant:invariant /app
 USER invariant
 
 EXPOSE 8000
-CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Inside the container the API listens on every interface; Compose decides
+# what reaches it from outside.
+ENV INVARIANT_HOST=0.0.0.0
+CMD ["uv", "run", "--no-sync", "python", "-m", "app.server"]

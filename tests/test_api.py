@@ -350,10 +350,20 @@ def test_only_connection_errors_report_the_database_unavailable(
     )
 
     assert response.status_code == status_code
+    error = response.json()["error"]
     if status_code == 500:
-        assert response.json()["detail"]["code"] == "storage_error"
+        assert (error["code"], error["message"]) == (
+            "storage_error",
+            "The database rejected the operation",
+        )
     else:
-        assert response.json() == {"detail": "Database unavailable"}
+        assert (error["code"], error["message"]) == (
+            "database_unavailable",
+            "Database unavailable",
+        )
+    # Neither the SQL nor the driver's message reaches the client.
+    assert "INSERT" not in response.text
+    assert "too long" not in response.text
 
 
 @pytest.mark.parametrize(

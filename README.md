@@ -139,7 +139,9 @@ uv run python -m app.worker        # in another terminal, for GitHub analyses
 ```
 
 The API is available at <http://127.0.0.1:8000>, with interactive documentation
-at <http://127.0.0.1:8000/docs>.
+at <http://127.0.0.1:8000/docs>. `fastapi dev` reloads on every change;
+`uv run python -m app.server` serves the API as the container does, with
+[structured logs](#logs).
 
 PostgreSQL listens on `5432` inside its container and maps to host port `5433`
 by default, avoiding a common conflict with host PostgreSQL installations. Set
@@ -161,6 +163,10 @@ by default, avoiding a common conflict with host PostgreSQL installations. Set
 | `GITHUB_API_URL` | `https://api.github.com` | Override for GitHub Enterprise Server or tests |
 | `INVARIANT_PUBLIC_URL` | unset | Where the API is reachable, for the link from a PR comment to its run |
 | `APP_PORT` | `8000` | Host port used by the Compose app service |
+| `INVARIANT_HOST` | `127.0.0.1` | Where `python -m app.server` listens (`0.0.0.0` in the image) |
+| `INVARIANT_PORT` | `8000` | Its port |
+| `INVARIANT_LOG_FORMAT` | `json` | `json`: one object per line; `text`: for a terminal |
+| `INVARIANT_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 
 Never commit `.env`. It is ignored, while `.env.example` contains placeholders
 and local-only example credentials.
@@ -480,9 +486,42 @@ without knowing the rest of the API.
 
 ### Errors
 
-Request validation errors return `422`. `503 Database unavailable` means
-PostgreSQL could not be reached; any other database failure returns
-`500 storage_error` without SQL or driver details and is logged on the server.
+Every error has the same shape, whatever its status:
+
+```json
+{"error": {"code": "project_not_found", "message": "Project not found",
+           "request_id": "6c1f0e3b9a2d4c5e8f7a6b5c4d3e2f1a"}}
+```
+
+`code` is stable and meant for programs; `message` is Invariant's own text
+and never contains SQL, a connection string, a token or a traceback. Every
+response, successful or not, carries the same ID in its `X-Request-ID`
+header, and the server's [log](#logs) lines for the request carry it too. A
+client may send its own `X-Request-ID` (1–64 letters, digits, `.`, `_`, `:`
+or `-`) to match it with its own logs; any other value is replaced.
+
+| Kind | Status | Codes |
+| --- | --- | --- |
+| The request cannot be accepted | 400, 404, 405, 409, 422 | `validation_error`, `invalid_config`, `invalid_webhook_payload`, `missing_github_delivery`, `project_not_found`, `rule_not_found`, `analysis_run_not_found`, `github_project_not_found`, `not_found`, `method_not_allowed`, `project_conflict`, `rule_conflict`, `github_not_configured` |
+| Authentication | 401, 503 | `invalid_github_signature`; `github_webhook_not_configured` when the webhook has no secret |
+| Storage | 500, 503 | `storage_error` (the database rejected the operation), `database_unavailable` |
+| Invariant itself | 500 | `internal_error` |
+
+`validation_error` and `invalid_config` also list what is wrong, without
+echoing the rejected value:
+
+```json
+{"error": {"code": "validation_error", "message": "The request is not valid",
+           "request_id": "…",
+           "fields": [{"location": "body.name",
+                       "message": "String should have at most 120 characters",
+                       "type": "string_too_long"}]}}
+```
+
+GitHub problems are not HTTP errors: the worker records them in the run's
+`error`, with codes such as `github_rate_limited`, `github_not_found`,
+`github_authentication_failed`, `github_invalid_response` or
+`github_unavailable` (see [above](#manual-github-pull-request-analysis)).
 
 ## GitHub webhook
 
@@ -583,6 +622,39 @@ late analysis never presents an old PASS as current. Without the token and
 the opt-in, Invariant writes nothing to GitHub. GitHub Check Runs are out of
 scope for v1.0.
 
+## Logs
+
+`python -m app.server` and `python -m app.worker` write one JSON object per
+line to stderr; `INVARIANT_LOG_FORMAT=text` gives lines for a terminal:
+
+```json
+{"time": "2026-10-24T06:24:29.555+00:00", "level": "INFO", "logger": "app.errors", "message": "GET /projects/1 404", "event": "request", "method": "GET", "path": "/projects/1", "status": 404, "duration_ms": 28, "request_id": "live-404"}
+```
+
+Each request is logged once, with its method, path (without the query
+string), status, duration and request ID. Runs are the worker's jobs, so a
+GitHub analysis can be followed by its `run_id` from the request that queued
+it to its comment:
+
+| `event` | Logged by | With |
+| --- | --- | --- |
+| `run_queued` | API | `request_id`, `source`, `pull_number`, `github_delivery_id` |
+| `delivery_duplicate` | API | `request_id` |
+| `run_claimed` | worker | `attempt`, `worker` |
+| `pull_request_fetched` | worker | `head_sha`, `files`, `skipped`, `truncated`, `duration_ms` |
+| `analysis_finished` | worker | `outcome`, `diagnostics`, `duration_ms` |
+| `run_completed` | API for direct analyses, worker | `outcome`, `duration_ms` |
+| `run_retry_scheduled`, `run_failed` | worker | `error_code`, `delay_seconds` |
+| `run_worker_lost`, `run_result_dropped` | worker | `requeued` |
+| `feedback_posted`, `feedback_stale`, `feedback_retry_scheduled`, `feedback_failed` | worker | `comment_id`, `new_comment`, `reason`, `error_code` |
+
+An unexpected error is logged with its traceback, under the request or the
+run it belongs to. The configured GitHub token and webhook secret, and a
+database password other than the local default, are replaced by
+`[redacted]` wherever they would appear in a line, and so is anything shaped
+like a GitHub token, a bearer credential or a password in a URL. Invariant
+does not log source code or request bodies.
+
 ## Testing and quality checks
 
 External GitHub calls are mocked; tests require no token and do not mutate a
@@ -616,7 +688,7 @@ docker compose up -d db
 uv run alembic upgrade head
 uv run alembic current
 uv run alembic check
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+uv run python -m app.server
 ```
 
 ## Security and limitations

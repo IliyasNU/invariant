@@ -217,7 +217,7 @@ def test_manual_github_analysis_requires_project_configuration(client, github):
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "github_not_configured"
+    assert response.json()["error"]["code"] == "github_not_configured"
     assert github.pull_calls == 0
 
 
@@ -384,7 +384,7 @@ def test_webhook_rejects_malformed_signed_payloads(
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "invalid_webhook_payload"
+    assert response.json()["error"]["code"] == "invalid_webhook_payload"
     assert github.pull_calls == 0
     assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
 
@@ -398,7 +398,7 @@ def test_webhook_rejects_deeply_nested_json(client, github, monkeypatch):
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "invalid_webhook_payload"
+    assert response.json()["error"]["code"] == "invalid_webhook_payload"
 
 
 def test_webhook_checks_signature_before_payload_types(client, github, monkeypatch):
@@ -484,7 +484,7 @@ def test_webhook_rejects_invalid_signature(client, github, monkeypatch):
     )
 
     assert response.status_code == 401
-    assert response.json()["detail"]["code"] == "invalid_github_signature"
+    assert response.json()["error"]["code"] == "invalid_github_signature"
 
 
 def test_webhook_requires_configured_secret(client, github, monkeypatch):
@@ -497,7 +497,7 @@ def test_webhook_requires_configured_secret(client, github, monkeypatch):
     )
 
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "github_webhook_not_configured"
+    assert response.json()["error"]["code"] == "github_webhook_not_configured"
 
 
 def test_webhook_ignores_irrelevant_event(client, github, monkeypatch):

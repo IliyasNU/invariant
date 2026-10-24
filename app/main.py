@@ -1,24 +1,15 @@
-import logging
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from sqlalchemy import text
-from sqlalchemy.exc import (
-    DisconnectionError,
-    InterfaceError,
-    OperationalError,
-    SQLAlchemyError,
-)
-from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.analysis_service import ProjectGitHubNotConfigured
 from app.api import router
 from app.database import engine
-from app.github import GitHubAPIError
+from app.errors import APIError, RequestContextMiddleware, install_error_handlers
 from app.github_api import router as github_router
+from app.schemas import ErrorResponse
 from invariant import __version__
-
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Invariant",
@@ -28,51 +19,26 @@ app = FastAPI(
 )
 app.include_router(router)
 app.include_router(github_router)
+install_error_handlers(app)
+app.add_middleware(RequestContextMiddleware)
 
 
-@app.exception_handler(GitHubAPIError)
-def github_api_error_handler(_request: Request, exc: GitHubAPIError) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": {"code": exc.code, "message": exc.message}},
-    )
-
-
-@app.exception_handler(ProjectGitHubNotConfigured)
-def github_not_configured_handler(
-    _request: Request, _exc: ProjectGitHubNotConfigured
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=409,
-        content={
-            "detail": {
-                "code": "github_not_configured",
-                "message": "Project has no GitHub owner/repository configuration",
-            }
-        },
-    )
-
-
-@app.exception_handler(SQLAlchemyError)
-def database_error_handler(_request: Request, exc: SQLAlchemyError) -> JSONResponse:
-    if isinstance(
-        exc, OperationalError | InterfaceError | DisconnectionError | PoolTimeoutError
-    ):
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Database unavailable"},
+def openapi() -> dict[str, Any]:
+    """The schema, with validation errors in Invariant's own error format."""
+    if app.openapi_schema is None:
+        schema = FastAPI.openapi(app)
+        components = schema.setdefault("components", {}).setdefault("schemas", {})
+        definition = ErrorResponse.model_json_schema(
+            ref_template="#/components/schemas/{model}"
         )
-    # The database is up but rejected the statement: a bug, not an outage.
-    logger.error("Database rejected a statement", exc_info=exc)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": {
-                "code": "storage_error",
-                "message": "The database rejected the operation",
-            }
-        },
-    )
+        components.update(definition.pop("$defs", {}))
+        # Every 422 response refers to HTTPValidationError.
+        components["HTTPValidationError"] = definition
+        components.pop("ValidationError", None)
+    return app.openapi_schema
+
+
+app.openapi = openapi
 
 
 @app.get("/health")
@@ -86,7 +52,7 @@ def db_health():
         with engine.connect() as connection:
             result = connection.execute(text("SELECT 1")).scalar_one()
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+        raise APIError(503, "database_unavailable", "Database unavailable") from exc
 
     return {
         "database": "ok",
