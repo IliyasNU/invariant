@@ -16,15 +16,17 @@ understanding, and the human developer remains the final authority.
 ```mermaid
 flowchart LR
     Direct[Direct API request] --> Pipeline[Shared analysis workflow]
-    Manual[Manual GitHub PR request] --> GitHub[GitHub REST client]
-    Webhook[Signed GitHub webhook] --> GitHub
+    Manual[Manual GitHub PR request] --> Queue[(Queued runs)]
+    Webhook[Signed GitHub webhook] --> Queue
+    Queue --> Worker[Worker]
+    Worker --> GitHub[GitHub REST client]
     GitHub --> Files[Changed Python files at PR head]
     Files --> Pipeline
     Pipeline --> AST[Deterministic Python AST analyzer]
     Rules[(Project rules)] --> AST
     AST --> Runs[(Analysis runs and violations)]
     Runs --> History[History API]
-    Runs -. optional .-> Comment[GitHub PR comment]
+    Runs -. optional .-> Comment[One PR comment, kept current]
 ```
 
 - **FastAPI** exposes projects, rules, analysis, history, health, and webhook APIs.
@@ -155,8 +157,9 @@ by default, avoiding a common conflict with host PostgreSQL installations. Set
 | `POSTGRES_PORT` | `5433` | Database port for local app execution / host mapping |
 | `GITHUB_TOKEN` | unset | Optional for public repositories; required for private repositories and PR comments |
 | `GITHUB_WEBHOOK_SECRET` | unset | Shared secret used to verify GitHub webhook signatures |
-| `GITHUB_POST_PR_COMMENT` | `false` | Post concise PASS/violation comments when a token is also present |
+| `GITHUB_POST_PR_COMMENT` | `false` | Keep one comment on each analyzed pull request up to date when a token is also present |
 | `GITHUB_API_URL` | `https://api.github.com` | Override for GitHub Enterprise Server or tests |
+| `INVARIANT_PUBLIC_URL` | unset | Where the API is reachable, for the link from a PR comment to its run |
 | `APP_PORT` | `8000` | Host port used by the Compose app service |
 
 Never commit `.env`. It is ignored, while `.env.example` contains placeholders
@@ -406,14 +409,18 @@ status is `completed` or `failed`. Each request queues a new run, so the same
 commit can be analyzed again. The worker fetches the pull request's metadata
 and changed files through GitHub's REST API, downloads each changed Python file
 at the head SHA, runs the shared AST analyzer and records the result. Removed
-and non-Python files are outside the analysis.
+and non-Python files are outside the analysis. After listing the files, the
+worker checks that the pull request is still at that head: if it moved to
+another commit meanwhile, the attempt is retried
+(`github_pull_request_changed`) rather than mixing two commits.
 
 If a changed `.py` file is over 1 MB (`too_large`), not UTF-8 (`undecodable`)
-or has a path the API rejects (`invalid_path`), or GitHub listed fewer files
-than the pull request changes (`file_list_truncated`), the run is `incomplete`
-and lists each of these as an `error` diagnostic. A pull request that changes
-no Python file, or none that an enabled rule applies to, is `not_applicable`.
-Neither posts a PR comment.
+or has a path the API rejects (`invalid_path`), if the analysis reaches 50 MB
+of files or the job time before a file (`limit_exceeded`), or if GitHub listed
+fewer files than the pull request changes (`file_list_truncated`), the run is
+`incomplete` and lists each of these as an `error` diagnostic. A pull request
+that changes no Python file, or none that an enabled rule applies to, is
+`not_applicable`. Neither has a verdict, and neither reads as a pass.
 
 When GitHub cannot be used, the worker retries what may pass (network
 failures, rate limits, GitHub server errors) and fails the run on anything
@@ -531,6 +538,7 @@ progress.
 | --- | --- | --- |
 | `WORKER_MAX_ATTEMPTS` | `3` | Attempts per run, the first included |
 | `WORKER_LEASE_SECONDS` | `600` | How long a worker holds a run before another may take it over |
+| `WORKER_JOB_SECONDS` | `300` | Files not downloaded by then make the run `incomplete`; at most 80% of the lease |
 | `WORKER_RETRY_SECONDS` | `30` | The first retry's delay; each next one doubles it, up to an hour |
 | `WORKER_POLL_SECONDS` | `2` | How often an idle worker looks for work |
 
@@ -543,10 +551,37 @@ GITHUB_TOKEN=github-token-with-repository-comment-permission
 GITHUB_POST_PR_COMMENT=true
 ```
 
-Invariant posts either `Invariant: PASS` or a concise violation list, and only
-for a verdict: incomplete, not-applicable and failed analyses post nothing. A comment
-failure is logged without secrets and does not roll back or fail the completed
-analysis. GitHub Check Runs are intentionally out of scope for v0.2.
+Set `INVARIANT_PUBLIC_URL` too, and the comment links to its run.
+
+Invariant keeps one comment on each pull request it analyzes and edits it
+after every completed run, so repeated deliveries and new commits never add
+comments; a deleted comment is written again. The comment names the commit it
+describes and the outcome, lists up to ten findings, says what was checked and
+what static analysis cannot see:
+
+```markdown
+**Invariant: FAIL** for `0123456789ab`: 1 violation at or above error
+
+- `app/domain/orders.py:3` error: `app.domain.orders must not import app.infrastructure.db`
+
+Checked 4 changed Python files against 2 rules; 1 excluded, 0 not analyzed. Invariant reads the code without running it, so dynamic imports and calls made through variables are not seen.
+Details: [run 42](https://invariant.example.com/analysis-runs/42) · Invariant 0.3.0.dev0
+```
+
+An incomplete run says `INCOMPLETE` and that there is no verdict; a run that
+no rule applies to says `NOT APPLICABLE`. Paths and messages are shown as code,
+so names from the pull request cannot format the comment or mention anyone.
+
+Publishing is separate from the analysis. A run's `feedback` shows its
+comment's status (`pending`, `posted`, `stale` or `failed`), attempts, next
+attempt and last error. A transient GitHub error retries the comment on the
+worker's backoff, up to `WORKER_MAX_ATTEMPTS`; a comment that cannot be
+written never changes the run's result. Before writing, the worker reads the
+pull request's current head: a run of an older commit, or one older than the
+run the comment already shows, becomes `stale` and stays in the history, so a
+late analysis never presents an old PASS as current. Without the token and
+the opt-in, Invariant writes nothing to GitHub. GitHub Check Runs are out of
+scope for v1.0.
 
 ## Testing and quality checks
 
@@ -590,9 +625,18 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 - Webhook signatures are checked against the exact raw body before JSON parsing.
 - Invariant never executes submitted or downloaded code.
 - GitHub content is limited to changed, non-deleted `.py` files that decode as
-  UTF-8 and are at most 1 MB. GitHub exposes at most 3,000 changed files for one
-  pull request through this REST endpoint. A pull request beyond these limits
-  is recorded as `incomplete`, never as a pass.
+  UTF-8 and are at most 1 MB, 50 MB in all, downloaded within
+  `WORKER_JOB_SECONDS`. Responses are read as a stream and abandoned at their
+  limit (10 MB for an API response), so an oversized one never reaches memory.
+  GitHub exposes at most 3,000 changed files for one pull request through this
+  REST endpoint. A pull request beyond these limits is recorded as
+  `incomplete`, never as a pass.
+- A run that fails (status `failed`) leaves the PR comment as it was: it keeps
+  describing the last completed run, and names that run's commit.
+- Invariant finds its PR comment through its database, not by searching the
+  pull request: after restoring a database without it, the next run writes a
+  new comment. If GitHub times out after creating a comment, the retry can
+  create a second one.
 - History keeps results, diagnostics, counts, configuration snapshots and
   commit IDs, but never source code. There is no retention policy yet: runs
   are kept until their project is deleted.
@@ -602,11 +646,12 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 - Columns count Unicode characters, 1-based. Runs stored before this change
   recorded UTF-8 byte offsets, which differ only after non-ASCII text on the
   same line.
-- Analysis is synchronous.
+- Direct analysis requests are answered synchronously; GitHub analyses run in
+  the worker.
 - Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
-- The service has no authentication, organizations, authorization model, web UI,
-  background queue, or deployment hardening yet. Do not expose it publicly
-  without an appropriate trusted network boundary.
+- The service has no authentication, organizations, authorization model, web
+  UI, or deployment hardening yet. Do not expose it publicly without an
+  appropriate trusted network boundary.
 - Repository-wide unchanged files are not analyzed; v0.2 evaluates changed PR
   files only.
 - CI checks the code, the migrations and the tests on SQLite and PostgreSQL,
