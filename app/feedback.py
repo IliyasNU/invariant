@@ -87,8 +87,11 @@ def feedback_body(run: AnalysisRun, public_url: str | None = None) -> str:
             where += f":{item.line}"
         label = item.severity if item.kind == "violation" else "not analyzed"
         lines.append(f"- {_code(where)} {label}: {_code(_shorten(item.message))}")
-    if len(run.violations) > MAX_ITEMS:
-        lines.append(f"- … and {len(run.violations) - MAX_ITEMS} more")
+    # Counted, not listed: a run stores only its first violations.
+    found = run.violation_count + run.analysis_error_count
+    shown = min(len(run.violations), MAX_ITEMS)
+    if found > shown:
+        lines.append(f"- … and {found - shown} more")
     if run.violations:
         lines.append("")
     lines.append(
