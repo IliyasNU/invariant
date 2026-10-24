@@ -35,7 +35,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    command: ["alembic", "upgrade", "head"]
     restart: "no"
 
   app:
@@ -47,7 +47,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    command: ["uv", "run", "--no-sync", "python", "-m", "app.server"]
+    command: ["python", "-m", "app.server"]
     healthcheck:
       # Ready: the database answers and its schema is this version's.
       test: ["CMD", "python", "-m", "app.healthcheck", "api"]
@@ -63,7 +63,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker"]
+    command: ["python", "-m", "app.worker"]
     healthcheck:
       # Alive: the worker touched its heartbeat within the lease.
       test: ["CMD", "python", "-m", "app.healthcheck", "worker"]

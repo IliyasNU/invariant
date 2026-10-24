@@ -1,0 +1,10 @@
+# Added to compose.yaml by scripts/compose_smoke.py: a stand-in for the
+# GitHub API, which the worker reads pull requests from and comments on.
+services:
+  github-stub:
+    image: python:3.14-slim
+    command: ["python", "/stub/github_stub.py", "8080"]
+    volumes:
+      - ./scripts:/stub:ro
+    ports:
+      - "127.0.0.1:8081:8080"

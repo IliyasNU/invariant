@@ -37,8 +37,11 @@ from app.feedback import claim_feedback, hold, publish_feedback, wants_feedback
 from app.github import GitHubAPIError, GitHubClient
 from app.logs import configure_logging, run_context
 from app.models import AnalysisRun
+from app.retention import prune
 
 logger = logging.getLogger("app.worker")
+
+PRUNE_SECONDS = 3600
 
 GitHubFactory = Callable[[], AbstractContextManager[GitHubClient]]
 
@@ -289,10 +292,16 @@ def run_worker(
         Path(settings.worker_heartbeat_file) if settings.worker_heartbeat_file else None
     )
     processed = 0
+    pruned_at: float | None = None
     while not stop.is_set():
         beat(heartbeat)
         with session_factory() as db:
             now = _now()
+            if settings.retention_days and (
+                pruned_at is None or time.monotonic() - pruned_at >= PRUNE_SECONDS
+            ):
+                pruned_at = time.monotonic()
+                prune(db, timedelta(days=settings.retention_days), now=now)
             recover_expired(db, policy, now)
             run = claim(db, worker_id, policy, now)
             if run is not None:

@@ -10,6 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never
+# The project's environment comes first, so that its python runs as the
+# container's first process and receives SIGTERM itself.
+ENV PATH="/app/.venv/bin:$PATH"
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -29,4 +32,4 @@ EXPOSE 8000
 # Inside the container the API listens on every interface; Compose decides
 # what reaches it from outside.
 ENV INVARIANT_HOST=0.0.0.0
-CMD ["uv", "run", "--no-sync", "python", "-m", "app.server"]
+CMD ["python", "-m", "app.server"]
