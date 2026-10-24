@@ -326,8 +326,11 @@ class AnalysisRunSummaryResponse(APIModel):
     files: FileCountsResponse = Field(validation_alias="file_counts")
     rules: RuleCountsResponse = Field(validation_alias="rule_counts")
     summary: DiagnosticCountsResponse = Field(validation_alias="diagnostic_counts")
-    # Why a failed run did not complete.
+    # Why a failed run did not complete, or a queued run's previous attempt.
     error: RunErrorResponse | None
+    # Attempts made by the worker, and when a queued retry may start.
+    attempts: int
+    next_attempt_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None
@@ -511,8 +514,9 @@ class GitHubAnalysisRequest(APIModel):
 
 
 class WebhookResponse(APIModel):
-    status: Literal["ignored", "analyzed", "duplicate"]
+    # queued: accepted for the worker; duplicate: a delivery seen before.
+    status: Literal["ignored", "queued", "duplicate"]
     analysis_run_id: int | None = None
-    # The run's outcome, for an analyzed or duplicate delivery.
+    # The outcome of a duplicate delivery's run, once it has one.
     outcome: RunOutcome | None = None
     detail: str | None = None

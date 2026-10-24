@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     github_webhook_secret: str | None = None
     github_post_pr_comment: bool = False
     github_api_url: str = "https://api.github.com"
+    # The worker that runs queued GitHub analyses.
+    worker_max_attempts: int = Field(default=3, ge=1, le=20)
+    worker_lease_seconds: int = Field(default=600, ge=30)
+    worker_poll_seconds: float = Field(default=2.0, gt=0)
+    # The first retry waits this long, each next one twice as long.
+    worker_retry_seconds: float = Field(default=30.0, gt=0)
 
 
 def get_database_url() -> str:

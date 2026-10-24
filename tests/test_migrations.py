@@ -93,7 +93,7 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
         run = connection.execute(
             text(
                 "SELECT status, outcome, passed, fail_on, error_count, warning_count, "
-                "analysis_error_count, files_total, started_at, config_hash "
+                "analysis_error_count, files_total, started_at, config_hash, attempts "
                 "FROM analysis_runs WHERE id = 1"
             )
         ).one()
@@ -128,6 +128,7 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
         None,
         None,
         None,
+        1,
     )
 
     sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)

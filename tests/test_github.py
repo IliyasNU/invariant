@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from typing import Self
 
 import httpx
 import pytest
@@ -13,12 +14,11 @@ from app.github import (
     GitHubClient,
     PullRequestMetadata,
     SkippedFile,
-    get_github_client,
     verify_webhook_signature,
 )
-from app.main import app
 from app.models import AnalysisRun
 from app.schemas import SourceFile
+from app.worker import Policy, run_worker
 from invariant.files import MAX_FILE_BYTES
 
 WEBHOOK_SECRET = "unit-test-webhook-secret"
@@ -75,13 +75,49 @@ class FakeGitHubClient:
             raise self.comment_error
         self.comments.append(body)
 
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
 
 @pytest.fixture
 def github() -> FakeGitHubClient:
-    fake = FakeGitHubClient()
-    app.dependency_overrides[get_github_client] = lambda: fake
-    yield fake
-    app.dependency_overrides.pop(get_github_client, None)
+    return FakeGitHubClient()
+
+
+def drain(github: FakeGitHubClient, max_attempts: int = 3) -> int:
+    """Let the worker run every queued run that is due, with ``github``."""
+    return run_worker(
+        github_factory=lambda: github,
+        policy=Policy(max_attempts=max_attempts),
+        until_idle=True,
+    )
+
+
+def analyze(client, github, project_id, pull_number=12, **policy) -> dict:
+    """Queue a manual analysis, let the worker run it, and return the run."""
+    response = client.post(
+        f"/projects/{project_id}/analyze/github", json={"pull_number": pull_number}
+    )
+    assert response.status_code == 202, response.json()
+    assert response.json()["status"] == "queued"
+    drain(github, **policy)
+    return client.get(f"/analysis-runs/{response.json()['id']}").json()
+
+
+def deliver(client, github, body: bytes, **header_options) -> dict:
+    """Post a signed webhook delivery, let the worker run it, and return the run."""
+    response = client.post(
+        "/integrations/github/webhook",
+        content=body,
+        headers=signed_headers(body, **header_options),
+    )
+    assert response.status_code == 202, response.json()
+    assert response.json()["status"] == "queued"
+    drain(github)
+    return client.get(f"/analysis-runs/{response.json()['analysis_run_id']}").json()
 
 
 def create_github_project(client):
@@ -132,22 +168,33 @@ def pull_request_payload(action: str = "opened") -> dict:
     }
 
 
-def test_manual_github_analysis_persists_result(client, github):
+def test_manual_github_analysis_is_queued_then_recorded_by_the_worker(client, github):
     project = create_github_project(client)
     create_rule(client, project["id"])
 
-    response = client.post(
+    queued = client.post(
         f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
     )
 
-    assert response.status_code == 200
-    result = response.json()
-    assert result["source"] == "github_pr"
-    assert result["pull_number"] == 12
+    assert queued.status_code == 202
+    accepted = queued.json()
+    assert (accepted["status"], accepted["outcome"], accepted["passed"]) == (
+        "queued",
+        None,
+        None,
+    )
+    assert github.pull_calls == 0  # nothing is fetched until the worker runs
+    assert drain(github) == 1
+    result = client.get(f"/analysis-runs/{accepted['id']}").json()
+    assert (result["status"], result["source"], result["pull_number"]) == (
+        "completed",
+        "github_pr",
+        12,
+    )
     assert result["repository_owner"] == "iliyasnu"
     assert result["violation_count"] == 1
     assert result["passed"] is False
-    assert client.get(f"/analysis-runs/{result['id']}").json() == result
+    assert drain(github) == 0
 
 
 def test_manual_github_analysis_requires_project_configuration(client, github):
@@ -176,14 +223,8 @@ def test_a_github_failure_is_recorded_as_a_failed_run_not_a_pass(client, github,
     github.comment_enabled = True
     github.error = error
 
-    response = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 999}
-    )
+    run = analyze(client, github, project["id"], pull_number=999, max_attempts=1)
 
-    assert response.status_code == error.status_code
-    detail = response.json()["detail"]
-    assert (detail["code"], detail["message"]) == (error.code, error.message)
-    run = client.get(f"/analysis-runs/{detail['analysis_run_id']}").json()
     assert (run["status"], run["outcome"], run["passed"]) == ("failed", None, None)
     assert run["error"] == {"code": error.code, "message": error.message}
     assert (run["pull_number"], run["violations"]) == (999, [])
@@ -197,12 +238,8 @@ def test_github_analysis_of_invalid_python_is_incomplete(client, github):
     github.comment_enabled = True
     github.files = [SourceFile(path="app/domain/broken.py", content="def broken(:\n")]
 
-    response = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
-    )
+    run = analyze(client, github, project["id"])
 
-    assert response.status_code == 200
-    run = response.json()
     assert (run["outcome"], run["passed"]) == ("incomplete", None)
     assert [(item["code"], item["path"]) for item in run["violations"]] == [
         ("syntax_error", "app/domain/broken.py")
@@ -216,12 +253,9 @@ def test_optional_comment_failure_does_not_fail_analysis(client, github):
     github.comment_enabled = True
     github.comment_error = GitHubAPIError(502, "github_api_error", "Failed")
 
-    response = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
-    )
+    run = analyze(client, github, project["id"])
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "completed"
+    assert (run["status"], run["outcome"]) == ("completed", "fail")
     assert github.comment_calls == 1
 
 
@@ -242,12 +276,8 @@ def test_incomplete_github_analysis_records_no_pass(client, github, skipped, tru
     github.skipped = skipped
     github.truncated = truncated
 
-    response = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
-    )
+    run = analyze(client, github, project["id"])
 
-    assert response.status_code == 200
-    run = response.json()
     assert (run["status"], run["outcome"], run["passed"]) == (
         "completed",
         "incomplete",
@@ -271,12 +301,8 @@ def test_github_pr_without_python_files_is_not_applicable(client, github):
     github.files = []
     github.ignored = 3
 
-    response = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
-    )
+    run = analyze(client, github, project["id"])
 
-    assert response.status_code == 200
-    run = response.json()
     assert (run["outcome"], run["passed"]) == ("not_applicable", None)
     assert (run["files"]["total"], run["files"]["ignored"]) == (3, 3)
     assert github.comment_calls == 0
@@ -289,15 +315,13 @@ def test_webhook_records_a_not_applicable_pull_request(client, github, monkeypat
     github.files = []
     body = json.dumps(pull_request_payload()).encode()
 
-    response = client.post(
-        "/integrations/github/webhook", content=body, headers=signed_headers(body)
-    )
+    run = deliver(client, github, body)
 
-    assert response.status_code == 200
-    reply = response.json()
-    assert (reply["status"], reply["outcome"]) == ("analyzed", "not_applicable")
-    run = client.get(f"/analysis-runs/{reply['analysis_run_id']}").json()
-    assert (run["source"], run["passed"]) == ("github_webhook", None)
+    assert (run["source"], run["outcome"], run["passed"]) == (
+        "github_webhook",
+        "not_applicable",
+        None,
+    )
     assert github.comment_calls == 0
 
 
@@ -310,15 +334,9 @@ def test_webhook_records_an_incomplete_analysis_without_a_verdict(
     github.skipped = [SkippedFile("app/domain/big.py", "too_large")]
     body = json.dumps(pull_request_payload()).encode()
 
-    response = client.post(
-        "/integrations/github/webhook", content=body, headers=signed_headers(body)
-    )
+    run = deliver(client, github, body)
 
-    assert response.status_code == 200
-    assert (response.json()["status"], response.json()["outcome"]) == (
-        "analyzed",
-        "incomplete",
-    )
+    assert (run["outcome"], run["passed"]) == ("incomplete", None)
     assert github.comment_calls == 0
 
 
@@ -390,22 +408,13 @@ def test_excluded_changes_are_not_applicable_rather_than_a_pass(
     client.patch(f"/projects/{project['id']}", json={"exclude_paths": ["app/"]})
     github.comment_enabled = True
 
-    manual = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
-    )
+    manual = analyze(client, github, project["id"])
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
-    body = json.dumps(pull_request_payload()).encode()
-    webhook = client.post(
-        "/integrations/github/webhook", content=body, headers=signed_headers(body)
-    )
+    webhook = deliver(client, github, json.dumps(pull_request_payload()).encode())
 
-    assert manual.status_code == 200
-    assert (manual.json()["outcome"], manual.json()["passed"]) == (
-        "not_applicable",
-        None,
-    )
-    assert manual.json()["files"]["excluded"] == 1
-    assert (webhook.status_code, webhook.json()["outcome"]) == (200, "not_applicable")
+    assert (manual["outcome"], manual["passed"]) == ("not_applicable", None)
+    assert manual["files"]["excluded"] == 1
+    assert webhook["outcome"] == "not_applicable"
     assert github.comment_calls == 0
 
 
@@ -423,9 +432,7 @@ def test_pr_comment_lists_warnings_on_a_pass(client, github):
     assert response.status_code == 201
     github.comment_enabled = True
 
-    result = client.post(
-        f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
-    ).json()
+    result = analyze(client, github, project["id"])
 
     assert (result["passed"], result["violation_count"]) == (True, 1)
     [comment] = github.comments
@@ -505,7 +512,7 @@ def test_webhook_ignores_irrelevant_pull_request_action(client, github, monkeypa
     assert github.pull_calls == 0
 
 
-def test_webhook_analyzes_and_deduplicates_delivery(client, github, monkeypatch):
+def test_webhook_queues_and_deduplicates_delivery(client, github, monkeypatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
     project = create_github_project(client)
     create_rule(client, project["id"])
@@ -513,17 +520,22 @@ def test_webhook_analyzes_and_deduplicates_delivery(client, github, monkeypatch)
     headers = signed_headers(body, delivery="same-delivery")
 
     first = client.post("/integrations/github/webhook", content=body, headers=headers)
-    second = client.post("/integrations/github/webhook", content=body, headers=headers)
+    early = client.post("/integrations/github/webhook", content=body, headers=headers)
+    drain(github)
+    late = client.post("/integrations/github/webhook", content=body, headers=headers)
 
-    assert first.status_code == 200
-    assert first.json()["status"] == "analyzed"
-    assert second.status_code == 200
-    assert second.json() == {
-        "status": "duplicate",
-        "analysis_run_id": first.json()["analysis_run_id"],
-        "outcome": "fail",
+    assert first.status_code == 202
+    run_id = first.json()["analysis_run_id"]
+    assert first.json() == {
+        "status": "queued",
+        "analysis_run_id": run_id,
+        "outcome": None,
         "detail": None,
     }
+    # A repeated delivery returns the first one's run, finished or not.
+    assert (early.status_code, early.json()["analysis_run_id"]) == (200, run_id)
+    assert (early.json()["status"], early.json()["outcome"]) == ("duplicate", None)
+    assert (late.status_code, late.json()["outcome"]) == (200, "fail")
     assert github.pull_calls == 1
     history = client.get(f"/projects/{project['id']}/analysis-runs").json()
     assert len(history) == 1
@@ -537,13 +549,8 @@ def test_github_runs_record_what_they_checked(client, github, monkeypatch):
     github.base_sha = "b" * 40
     body = json.dumps(pull_request_payload()).encode()
 
-    reply = client.post(
-        "/integrations/github/webhook",
-        content=body,
-        headers=signed_headers(body, delivery="delivery-42"),
-    ).json()
+    run = deliver(client, github, body, delivery="delivery-42")
 
-    run = client.get(f"/analysis-runs/{reply['analysis_run_id']}").json()
     assert (
         run["source"],
         run["repository_owner"],

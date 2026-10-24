@@ -7,6 +7,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -119,10 +120,13 @@ class AnalysisRun(Base):
             "OR (COALESCE(outcome, '') NOT IN ('pass', 'fail') AND passed IS NULL)",
             name="ck_analysis_runs_passed",
         ),
+        # A queued run may keep the error of its previous attempt.
         CheckConstraint(
-            "(status = 'failed') = (error_code IS NOT NULL)",
+            "(status <> 'failed' OR error_code IS NOT NULL) "
+            "AND (status <> 'completed' OR error_code IS NULL)",
             name="ck_analysis_runs_error",
         ),
+        Index("ix_analysis_runs_status_next_attempt_at", "status", "next_attempt_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -167,9 +171,16 @@ class AnalysisRun(Base):
     # The project settings and rules that were checked, and their SHA-256.
     config_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     config_hash: Mapped[str | None] = mapped_column(String(64))
-    # Why a failed run did not complete; never a token or an upstream payload.
+    # Why a failed run did not complete, or why a queued run's previous attempt
+    # did not; never a token or an upstream payload.
     error_code: Mapped[str | None] = mapped_column(String(50))
     error_message: Mapped[str | None] = mapped_column(Text)
+    # The worker queue: attempts made, when the next may start, and the lease
+    # of the worker running the run.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
