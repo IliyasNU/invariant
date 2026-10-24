@@ -20,10 +20,16 @@ class Settings(BaseSettings):
     github_webhook_secret: str | None = None
     github_post_pr_comment: bool = False
     github_api_url: str = "https://api.github.com"
+    # Where this API is reachable, for links in pull request comments.
+    public_url: str | None = Field(
+        default=None, validation_alias="INVARIANT_PUBLIC_URL"
+    )
     # The worker that runs queued GitHub analyses.
     worker_max_attempts: int = Field(default=3, ge=1, le=20)
     worker_lease_seconds: int = Field(default=600, ge=30)
     worker_poll_seconds: float = Field(default=2.0, gt=0)
+    # Files not downloaded by then make a run incomplete; less than the lease.
+    worker_job_seconds: int = Field(default=300, ge=10)
     # The first retry waits this long, each next one twice as long.
     worker_retry_seconds: float = Field(default=30.0, gt=0)
 

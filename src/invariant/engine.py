@@ -22,7 +22,12 @@ from invariant.result import AnalysisResult, Diagnostic, FileCounts, Outcome
 from invariant.rules import CHECKERS, ParsedFile, rule_applies
 
 UnreadableReason = Literal[
-    "too_large", "undecodable", "invalid_path", "symlink", "unreadable"
+    "too_large",
+    "undecodable",
+    "invalid_path",
+    "symlink",
+    "unreadable",
+    "limit_exceeded",
 ]
 
 _UNREADABLE_MESSAGES: dict[str, str] = {
@@ -31,6 +36,7 @@ _UNREADABLE_MESSAGES: dict[str, str] = {
     "invalid_path": "The path cannot name a file in the repository",
     "symlink": "The file is a symbolic link, which is not followed",
     "unreadable": "The file could not be read",
+    "limit_exceeded": "The analysis reached its size or time limit before this file",
 }
 
 

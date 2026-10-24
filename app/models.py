@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -127,6 +128,11 @@ class AnalysisRun(Base):
             name="ck_analysis_runs_error",
         ),
         Index("ix_analysis_runs_status_next_attempt_at", "status", "next_attempt_at"),
+        CheckConstraint(
+            "feedback_status IS NULL "
+            "OR feedback_status IN ('pending', 'posted', 'stale', 'failed')",
+            name="ck_analysis_runs_feedback",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -181,6 +187,14 @@ class AnalysisRun(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(String(100))
+    # The pull request comment for this run: pending, posted, stale (the pull
+    # request moved on to another commit) or failed; null when there is none.
+    feedback_status: Mapped[str | None] = mapped_column(String(20))
+    feedback_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    feedback_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    feedback_error: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -226,6 +240,17 @@ class AnalysisRun(Base):
             return None
         return {"code": self.error_code, "message": self.error_message}
 
+    @property
+    def feedback(self) -> dict[str, Any] | None:
+        if self.feedback_status is None:
+            return None
+        return {
+            "status": self.feedback_status,
+            "attempts": self.feedback_attempts,
+            "next_attempt_at": self.feedback_next_attempt_at,
+            "error": self.feedback_error,
+        }
+
 
 class AnalysisViolation(Base):
     __tablename__ = "analysis_violations"
@@ -253,3 +278,30 @@ class AnalysisViolation(Base):
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     analysis_run: Mapped[AnalysisRun] = relationship(back_populates="violations")
+
+
+class PullRequestComment(Base):
+    """The one comment Invariant keeps on a pull request, and the run it shows."""
+
+    __tablename__ = "pull_request_comments"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "pull_number", name="uq_pull_request_comments_pull"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # The unique constraint's index also serves lookups by project.
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    pull_number: Mapped[int] = mapped_column(Integer)
+    # Null until the comment exists on GitHub.
+    comment_id: Mapped[int | None] = mapped_column(BigInteger)
+    analysis_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="SET NULL")
+    )
+    head_sha: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
