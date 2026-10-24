@@ -16,11 +16,11 @@ jobs:
   invariant:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # The diff mode needs the pull request's base commit.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
       # Pin a release tag or commit instead of main for reproducible checks.
