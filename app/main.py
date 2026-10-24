@@ -21,12 +21,14 @@ from app.api import router
 from app.database import engine
 from app.github import GitHubAPIError
 from app.github_api import router as github_router
+from invariant import __version__
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Invariant",
-    version="0.2.0",
+    # One version for the package, the API and the CLI.
+    version=__version__,
     description="Store architecture rules and analyze Python changes or GitHub PRs.",
 )
 app.include_router(router)
