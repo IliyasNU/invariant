@@ -37,7 +37,7 @@ class FakeGitHub:
             raise self.errors.pop(0)
         return PullRequestMetadata(number=pull_number, head_sha="a" * 40)
 
-    def get_changed_python_files(self, owner, repo, pull_request):
+    def get_changed_python_files(self, owner, repo, pull_request, **options):
         return ChangedPythonFiles(
             files=[SourceFile(path="app/x.py", content="x = 1\n")],
             skipped=[],

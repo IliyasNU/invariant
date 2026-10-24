@@ -10,7 +10,6 @@ written in one transaction.
 
 import hashlib
 import json
-import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,8 +24,6 @@ from invariant import __version__
 from invariant.config import SCHEMA_VERSION, InvariantConfig
 from invariant.engine import Unreadable
 from invariant.result import RESULT_SCHEMA_VERSION, AnalysisResult, Diagnostic
-
-logger = logging.getLogger(__name__)
 
 
 class ProjectGitHubNotConfigured(Exception):
@@ -178,12 +175,18 @@ def enqueue_github_analysis(
 
 
 def execute_github_analysis(
-    db: Session, run: AnalysisRun, github: GitHubClient
+    db: Session,
+    run: AnalysisRun,
+    github: GitHubClient,
+    *,
+    deadline: float | None = None,
 ) -> None:
     """Analyze the pull request of a claimed run and record the result in it.
 
-    Nothing is committed: the worker commits only while it still holds the
-    run. A GitHubAPIError propagates, for the worker to retry or fail the run.
+    Files not downloaded by ``deadline`` (a ``time.monotonic()`` value) make the
+    run incomplete. Nothing is committed: the worker commits only while it
+    still holds the run. A GitHubAPIError propagates, for the worker to retry
+    or fail the run.
     """
     started_at = _now()
     run.started_at = started_at
@@ -200,7 +203,7 @@ def execute_github_analysis(
         project.github_owner, project.github_repo, run.pull_number
     )
     changed = github.get_changed_python_files(
-        project.github_owner, project.github_repo, pull_request
+        project.github_owner, project.github_repo, pull_request, deadline=deadline
     )
     errors = []
     if changed.truncated:
@@ -226,49 +229,6 @@ def execute_github_analysis(
     _complete(
         run, project, rules, result, started_at=started_at, pull_request=pull_request
     )
-
-
-def post_feedback(github: GitHubClient, run: AnalysisRun) -> None:
-    """Comment on the pull request when the run has a verdict and it is enabled.
-
-    Only a verdict is announced: a pass would claim a check that did not run.
-    """
-    if run.outcome in ("pass", "fail"):
-        _post_feedback(github, run)
-
-
-def _post_feedback(github: GitHubClient, run: AnalysisRun) -> None:
-    owner, repo = run.repository_owner, run.repository_name
-    if not github.comment_enabled or not owner or not repo or run.pull_number is None:
-        return
-
-    violations = [item for item in run.violations if item.kind == "violation"]
-    items = [
-        f"- {violation.path}:{violation.line or '?'}: "
-        + ("warning: " if violation.severity == "warning" else "")
-        + violation.message
-        for violation in violations[:10]
-    ]
-    suffix = "\n- …" if run.violation_count > 10 else ""
-    if run.passed and not items:
-        body = "Invariant: PASS"
-    elif run.passed:
-        body = (
-            f"Invariant: PASS with {run.violation_count} warning(s):\n\n"
-            + "\n".join(items)
-            + suffix
-        )
-    else:
-        body = (
-            f"Invariant found {run.violation_count} architecture violation(s):\n\n"
-            + "\n".join(items)
-            + suffix
-        )
-
-    try:
-        github.post_pull_request_comment(owner, repo, run.pull_number, body)
-    except GitHubAPIError as exc:
-        logger.warning("Could not post optional GitHub PR feedback: %s", exc.code)
 
 
 def result_document(run: AnalysisRun) -> dict[str, Any]:

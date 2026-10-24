@@ -270,6 +270,7 @@ class ViolationResponse(APIModel):
 
 RunStatus = Literal["queued", "running", "completed", "failed"]
 RunOutcome = Literal["pass", "fail", "incomplete", "not_applicable"]
+FeedbackStatus = Literal["pending", "posted", "stale", "failed"]
 
 
 class FileCountsResponse(APIModel):
@@ -305,6 +306,16 @@ class RunErrorResponse(APIModel):
     message: str | None
 
 
+class FeedbackResponse(APIModel):
+    # stale: the pull request moved on, or its comment shows a newer run.
+    status: FeedbackStatus
+    attempts: int
+    # When a pending comment is tried again.
+    next_attempt_at: datetime | None
+    # The last attempt's error code, kept until the comment is posted.
+    error: str | None
+
+
 class AnalysisRunSummaryResponse(APIModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -331,6 +342,8 @@ class AnalysisRunSummaryResponse(APIModel):
     # Attempts made by the worker, and when a queued retry may start.
     attempts: int
     next_attempt_at: datetime | None
+    # The pull request comment for this run; null when none is written.
+    feedback: FeedbackResponse | None
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None

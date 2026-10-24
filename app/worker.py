@@ -8,7 +8,11 @@ transient GitHub error (the network, a rate limit, a server error) queues the
 run again after a backoff that honours Retry-After; any other error fails it.
 
 A worker records a result only while it still holds the run, so a worker that
-lost its lease to another cannot overwrite that worker's result.
+lost its lease to another cannot overwrite that worker's result. Files it has
+not downloaded within the job time limit make the run incomplete.
+
+When pull request comments are enabled, a completed run's comment is
+published right after the run, and retried on its own (``app.feedback``).
 """
 
 import logging
@@ -16,6 +20,7 @@ import os
 import signal
 import socket
 import threading
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -24,9 +29,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.analysis_service import execute_github_analysis, fail_run, post_feedback
+from app.analysis_service import execute_github_analysis, fail_run
 from app.config import Settings
 from app.database import SessionLocal
+from app.feedback import claim_feedback, hold, publish_feedback, wants_feedback
 from app.github import GitHubAPIError, GitHubClient
 from app.models import AnalysisRun
 
@@ -39,15 +45,22 @@ GitHubFactory = Callable[[], AbstractContextManager[GitHubClient]]
 class Policy:
     max_attempts: int = 3
     lease: timedelta = timedelta(minutes=10)
+    # Within the lease, so that a slow run is not taken over while it runs.
+    job_time: timedelta = timedelta(minutes=5)
     retry_base: timedelta = timedelta(seconds=30)
     retry_max: timedelta = timedelta(hours=1)
+    # Where the API is reachable, for the run link in pull request comments.
+    public_url: str | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Policy:
+        lease = timedelta(seconds=settings.worker_lease_seconds)
         return cls(
             max_attempts=settings.worker_max_attempts,
-            lease=timedelta(seconds=settings.worker_lease_seconds),
+            lease=lease,
+            job_time=min(timedelta(seconds=settings.worker_job_seconds), lease * 0.8),
             retry_base=timedelta(seconds=settings.worker_retry_seconds),
+            public_url=settings.public_url,
         )
 
     def retry_delay(self, attempt: int, retry_after: float | None) -> timedelta:
@@ -131,16 +144,23 @@ def process(
     """Execute a claimed run and record how it ended."""
     # A rollback forgets what the attempt changed, its start time included.
     started_at = _now()
+    deadline = time.monotonic() + policy.job_time.total_seconds()
     try:
         with github_factory() as github:
-            execute_github_analysis(db, run, github)
+            execute_github_analysis(db, run, github, deadline=deadline)
             if not _still_ours(db, run, worker_id):
                 db.rollback()
                 logger.warning("Run %s was taken over; its result is dropped", run.id)
                 return
             run.lease_expires_at = None
+            publish = wants_feedback(run, github)
+            if publish:
+                # Due with the result, so a crash before publishing only delays it.
+                run.feedback_status = "pending"
+                hold(run, policy.lease.total_seconds(), _now())
             db.commit()
-            post_feedback(github, run)
+            if publish:
+                _publish(db, run, github, policy)
     except GitHubAPIError as exc:
         db.rollback()
         if not _still_ours(db, run, worker_id):
@@ -167,6 +187,19 @@ def process(
             db.commit()
         else:
             db.rollback()
+
+
+def _publish(
+    db: Session, run: AnalysisRun, github: GitHubClient, policy: Policy
+) -> None:
+    publish_feedback(
+        db,
+        run,
+        github,
+        public_url=policy.public_url,
+        max_attempts=policy.max_attempts,
+        retry_delay=policy.retry_delay,
+    )
 
 
 def run_worker(
@@ -196,6 +229,11 @@ def run_worker(
             if run is not None:
                 process(db, run, github_factory, policy, worker_id)
                 processed += 1
+                continue
+            feedback = claim_feedback(db, policy.lease.total_seconds(), now)
+            if feedback is not None:
+                with github_factory() as github:
+                    _publish(db, feedback, github, policy)
                 continue
         if until_idle:
             break

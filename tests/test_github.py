@@ -55,7 +55,7 @@ class FakeGitHubClient:
         )
 
     def get_changed_python_files(
-        self, owner: str, repo: str, pull_request: PullRequestMetadata
+        self, owner: str, repo: str, pull_request: PullRequestMetadata, **options
     ) -> ChangedPythonFiles:
         assert (owner, repo) == ("iliyasnu", "invariant")
         assert pull_request.head_sha == "abc123"
@@ -67,13 +67,19 @@ class FakeGitHubClient:
             ignored=self.ignored,
         )
 
-    def post_pull_request_comment(
-        self, owner: str, repo: str, pull_number: int, body: str
-    ) -> None:
+    def create_comment(self, owner: str, repo: str, pull_number: int, body: str) -> int:
         self.comment_calls += 1
         if self.comment_error:
             raise self.comment_error
         self.comments.append(body)
+        return len(self.comments)
+
+    def update_comment(self, owner: str, repo: str, comment_id: int, body: str) -> bool:
+        self.comment_calls += 1
+        if self.comment_error:
+            raise self.comment_error
+        self.comments.append(body)
+        return True
 
     def __enter__(self) -> Self:
         return self
@@ -85,6 +91,12 @@ class FakeGitHubClient:
 @pytest.fixture
 def github() -> FakeGitHubClient:
     return FakeGitHubClient()
+
+
+def assert_no_pass_announced(github: FakeGitHubClient) -> None:
+    # A run without a verdict says why in the comment, but never PASS.
+    assert github.comments
+    assert not any("PASS" in comment for comment in github.comments)
 
 
 def drain(github: FakeGitHubClient, max_attempts: int = 3) -> int:
@@ -244,7 +256,7 @@ def test_github_analysis_of_invalid_python_is_incomplete(client, github):
     assert [(item["code"], item["path"]) for item in run["violations"]] == [
         ("syntax_error", "app/domain/broken.py")
     ]
-    assert github.comment_calls == 0
+    assert_no_pass_announced(github)
 
 
 def test_optional_comment_failure_does_not_fail_analysis(client, github):
@@ -265,6 +277,7 @@ def test_optional_comment_failure_does_not_fail_analysis(client, github):
         ([SkippedFile("app/domain/big.py", "too_large")], False),
         ([SkippedFile("app/domain/latin.py", "undecodable")], False),
         ([SkippedFile("app\\..\\x.py", "invalid_path")], False),
+        ([SkippedFile("app/domain/late.py", "limit_exceeded")], False),
         ([], True),
     ],
 )
@@ -291,7 +304,7 @@ def test_incomplete_github_analysis_records_no_pass(client, github, skipped, tru
     assert run["files"]["skipped"] == len(skipped)
     history = client.get(f"/projects/{project['id']}/analysis-runs").json()
     assert [item["id"] for item in history] == [run["id"]]
-    assert github.comment_calls == 0
+    assert_no_pass_announced(github)
 
 
 def test_github_pr_without_python_files_is_not_applicable(client, github):
@@ -305,7 +318,7 @@ def test_github_pr_without_python_files_is_not_applicable(client, github):
 
     assert (run["outcome"], run["passed"]) == ("not_applicable", None)
     assert (run["files"]["total"], run["files"]["ignored"]) == (3, 3)
-    assert github.comment_calls == 0
+    assert_no_pass_announced(github)
 
 
 def test_webhook_records_a_not_applicable_pull_request(client, github, monkeypatch):
@@ -322,7 +335,7 @@ def test_webhook_records_a_not_applicable_pull_request(client, github, monkeypat
         "not_applicable",
         None,
     )
-    assert github.comment_calls == 0
+    assert_no_pass_announced(github)
 
 
 def test_webhook_records_an_incomplete_analysis_without_a_verdict(
@@ -337,7 +350,7 @@ def test_webhook_records_an_incomplete_analysis_without_a_verdict(
     run = deliver(client, github, body)
 
     assert (run["outcome"], run["passed"]) == ("incomplete", None)
-    assert github.comment_calls == 0
+    assert_no_pass_announced(github)
 
 
 def valid_event(**changes) -> dict:
@@ -415,7 +428,7 @@ def test_excluded_changes_are_not_applicable_rather_than_a_pass(
     assert (manual["outcome"], manual["passed"]) == ("not_applicable", None)
     assert manual["files"]["excluded"] == 1
     assert webhook["outcome"] == "not_applicable"
-    assert github.comment_calls == 0
+    assert_no_pass_announced(github)
 
 
 def test_pr_comment_lists_warnings_on_a_pass(client, github):
@@ -436,9 +449,12 @@ def test_pr_comment_lists_warnings_on_a_pass(client, github):
 
     assert (result["passed"], result["violation_count"]) == (True, 1)
     [comment] = github.comments
-    assert comment.startswith("Invariant: PASS with 1 warning(s):")
+    assert comment.splitlines()[:2] == [
+        "<!-- invariant:feedback -->",
+        "**Invariant: PASS** for `abc123` with 1 warning",
+    ]
     assert (
-        "app/domain/service.py:1: warning: app.domain.service must not import"
+        "- `app/domain/service.py:1` warning: `app.domain.service must not import"
         in comment
     )
 
@@ -570,6 +586,19 @@ def mock_github(handler) -> GitHubClient:
     return GitHubClient(settings, transport=httpx.MockTransport(handler))
 
 
+def with_metadata(handler, head: str | None = None):
+    """``handler``, plus pull request 7's metadata, whose head is ``head``."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls/7"):
+            return httpx.Response(
+                200, json={"number": 7, "head": {"sha": head or HEAD_SHA}}
+            )
+        return handler(request)
+
+    return answer
+
+
 HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
 BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 
@@ -659,8 +688,8 @@ def test_github_client_reports_files_it_could_not_analyze():
         downloaded.append(path)
         return httpx.Response(200, content=contents[path])
 
-    pull = PullRequestMetadata(number=7, head_sha="deadbeef", changed_files=4)
-    with mock_github(handler) as github:
+    pull = PullRequestMetadata(number=7, head_sha=HEAD_SHA, changed_files=4)
+    with mock_github(with_metadata(handler)) as github:
         changed = github.get_changed_python_files("owner", "repo", pull)
 
     assert changed.skipped == [
@@ -690,8 +719,8 @@ def test_github_client_detects_truncated_file_list(listed, changed_files, trunca
         page = int(request.url.params["page"])
         return httpx.Response(200, json=entries[(page - 1) * 100 : page * 100])
 
-    pull = PullRequestMetadata(number=7, head_sha="sha", changed_files=changed_files)
-    with mock_github(handler) as github:
+    pull = PullRequestMetadata(number=7, head_sha=HEAD_SHA, changed_files=changed_files)
+    with mock_github(with_metadata(handler)) as github:
         changed = github.get_changed_python_files("owner", "repo", pull)
 
     assert changed.truncated is truncated
@@ -706,8 +735,8 @@ def test_github_client_downloads_nothing_from_a_truncated_list():
         page = int(request.url.params["page"])
         return httpx.Response(200, json=entries if page == 1 else [])
 
-    pull = PullRequestMetadata(number=7, head_sha="sha", changed_files=101)
-    with mock_github(handler) as github:
+    pull = PullRequestMetadata(number=7, head_sha=HEAD_SHA, changed_files=101)
+    with mock_github(with_metadata(handler)) as github:
         changed = github.get_changed_python_files("owner", "repo", pull)
 
     assert changed.truncated
@@ -721,8 +750,11 @@ def test_github_client_rejects_malformed_file_lists(payload):
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=payload)
 
-    pull = PullRequestMetadata(number=7, head_sha="sha")
-    with mock_github(handler) as github, pytest.raises(GitHubAPIError) as exc_info:
+    pull = PullRequestMetadata(number=7, head_sha=HEAD_SHA)
+    with (
+        mock_github(with_metadata(handler)) as github,
+        pytest.raises(GitHubAPIError) as exc_info,
+    ):
         github.get_changed_python_files("owner", "repo", pull)
 
     assert exc_info.value.code == "github_invalid_response"

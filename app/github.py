@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from invariant import __version__
 from invariant.files import MAX_FILE_BYTES, decode_source
 
 MAX_FILE_PAGES = 30
+# Bodies are read up to these limits and no further.
+MAX_RESPONSE_BYTES = 10_000_000  # one page of metadata or of the file list
+MAX_TOTAL_BYTES = 50_000_000  # every file of one pull request
 # A Git commit ID: SHA-1, or SHA-256 for repositories that use it.
 COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 FILES_PER_PAGE = 100
@@ -32,7 +36,7 @@ class PullRequestMetadata:
 @dataclass(frozen=True)
 class SkippedFile:
     path: str
-    reason: Literal["too_large", "undecodable", "invalid_path"]
+    reason: Literal["too_large", "undecodable", "invalid_path", "limit_exceeded"]
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,9 @@ class GitHubClient:
             base_url=settings.github_api_url.rstrip("/"),
             headers=headers,
             timeout=15,
+            # A renamed or transferred repository answers with a redirect.
+            # httpx drops the token when a redirect leaves the API's origin.
+            follow_redirects=True,
             transport=transport,
         )
 
@@ -106,9 +113,26 @@ class GitHubClient:
     def close(self) -> None:
         self._client.close()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _send(
+        self, method: str, path: str, *, limit: int, **kwargs: Any
+    ) -> bytes | None:
+        """A successful response's body, or None if it is longer than ``limit``.
+
+        The body is streamed and abandoned at the limit, so an oversized response
+        never reaches memory.
+        """
         try:
-            response = self._client.request(method, path, **kwargs)
+            with self._client.stream(method, path, **kwargs) as response:
+                _check_status(response)
+                declared = response.headers.get("Content-Length", "")
+                if declared.isdigit() and int(declared) > limit:
+                    return None
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body += chunk
+                    if len(body) > limit:
+                        return None
+                return bytes(body)
         except httpx.RequestError as exc:
             raise GitHubAPIError(
                 status_code=503,
@@ -117,45 +141,16 @@ class GitHubClient:
                 transient=True,
             ) from exc
 
-        if response.status_code < 400:
-            return response
-        if response.status_code == 404:
-            raise GitHubAPIError(
-                status_code=404,
-                code="github_not_found",
-                message="GitHub repository, pull request, or file was not found",
-            )
-        if response.status_code == 429 or (
-            response.status_code == 403
-            and (
-                response.headers.get("X-RateLimit-Remaining") == "0"
-                or "Retry-After" in response.headers
-            )
-        ):
-            raise GitHubAPIError(
-                status_code=429,
-                code="github_rate_limited",
-                message="GitHub API rate limit exceeded",
-                transient=True,
-                retry_after=_retry_after(response),
-            )
-        if response.status_code in {401, 403}:
+    def _json(self, method: str, path: str, **kwargs: Any) -> Any:
+        body = self._send(method, path, limit=MAX_RESPONSE_BYTES, **kwargs)
+        if body is None:
             raise GitHubAPIError(
                 status_code=502,
-                code="github_authentication_failed",
-                message="GitHub rejected the configured credentials or permissions",
+                code="github_invalid_response",
+                message="GitHub returned a response over the size limit",
             )
-        raise GitHubAPIError(
-            status_code=502,
-            code="github_api_error",
-            message=f"GitHub API returned status {response.status_code}",
-            transient=response.status_code >= 500,
-        )
-
-    def _json(self, path: str, **kwargs: Any) -> Any:
-        response = self._request("GET", path, **kwargs)
         try:
-            return response.json()
+            return json.loads(body)
         except ValueError as exc:
             raise GitHubAPIError(
                 status_code=502,
@@ -166,7 +161,7 @@ class GitHubClient:
     def get_pull_request(
         self, owner: str, repo: str, pull_number: int
     ) -> PullRequestMetadata:
-        payload = self._json(f"/repos/{owner}/{repo}/pulls/{pull_number}")
+        payload = self._json("GET", f"/repos/{owner}/{repo}/pulls/{pull_number}")
         try:
             number = payload["number"]
             head_sha = payload["head"]["sha"]
@@ -212,6 +207,7 @@ class GitHubClient:
         changed_files: list[dict[str, Any]] = []
         for page in range(1, MAX_FILE_PAGES + 1):
             payload = self._json(
+                "GET",
                 f"/repos/{owner}/{repo}/pulls/{pull_number}/files",
                 params={"per_page": FILES_PER_PAGE, "page": page},
             )
@@ -230,20 +226,44 @@ class GitHubClient:
                 break
         return changed_files
 
-    def get_file_bytes(self, owner: str, repo: str, path: str, ref: str) -> bytes:
+    def get_file_bytes(
+        self, owner: str, repo: str, path: str, ref: str
+    ) -> bytes | None:
+        """The file at ``ref``, or None if it is larger than ``MAX_FILE_BYTES``."""
         encoded_path = quote(path, safe="/")
-        response = self._request(
+        return self._send(
             "GET",
             f"/repos/{owner}/{repo}/contents/{encoded_path}",
+            limit=MAX_FILE_BYTES,
             params={"ref": ref},
             headers={"Accept": "application/vnd.github.raw+json"},
         )
-        return response.content
 
     def get_changed_python_files(
-        self, owner: str, repo: str, pull_request: PullRequestMetadata
+        self,
+        owner: str,
+        repo: str,
+        pull_request: PullRequestMetadata,
+        *,
+        deadline: float | None = None,
     ) -> ChangedPythonFiles:
+        """The changed Python files at the pull request's head commit.
+
+        Files are read only at ``pull_request.head_sha``. If the pull request
+        moved to another commit while its files were listed, the list may
+        belong to that commit, so the analysis is retried rather than mixed.
+        Past ``deadline`` (a ``time.monotonic()`` value) or ``MAX_TOTAL_BYTES``,
+        the remaining files are reported instead of downloaded.
+        """
         entries = self.get_changed_files(owner, repo, pull_request.number)
+        latest = self.get_pull_request(owner, repo, pull_request.number)
+        if latest.head_sha != pull_request.head_sha:
+            raise GitHubAPIError(
+                status_code=409,
+                code="github_pull_request_changed",
+                message="The pull request changed while its files were listed",
+                transient=True,
+            )
         if pull_request.changed_files is not None:
             truncated = len(entries) < pull_request.changed_files
         else:
@@ -252,6 +272,7 @@ class GitHubClient:
         files: list[SourceFile] = []
         skipped: list[SkippedFile] = []
         ignored = 0
+        budget = MAX_TOTAL_BYTES
         for entry in entries:
             path = entry["filename"]
             if entry.get("status") in {"removed", "deleted"} or not path.endswith(
@@ -268,10 +289,14 @@ class GitHubClient:
             if truncated:
                 # The result is incomplete anyway; spare the downloads.
                 continue
+            if budget <= 0 or (deadline is not None and time.monotonic() > deadline):
+                skipped.append(SkippedFile(path, "limit_exceeded"))
+                continue
             content = self.get_file_bytes(owner, repo, path, pull_request.head_sha)
-            if len(content) > MAX_FILE_BYTES:
+            if content is None:
                 skipped.append(SkippedFile(path, "too_large"))
                 continue
+            budget -= len(content)
             try:
                 text = decode_source(content)
             except UnicodeDecodeError:
@@ -282,14 +307,73 @@ class GitHubClient:
             files=files, skipped=skipped, truncated=truncated, ignored=ignored
         )
 
-    def post_pull_request_comment(
-        self, owner: str, repo: str, pull_number: int, body: str
-    ) -> None:
-        self._request(
+    def create_comment(self, owner: str, repo: str, pull_number: int, body: str) -> int:
+        """Comment on the pull request; returns the new comment's ID."""
+        payload = self._json(
             "POST",
             f"/repos/{owner}/{repo}/issues/{pull_number}/comments",
             json={"body": body},
         )
+        comment_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(comment_id, int) or isinstance(comment_id, bool):
+            raise GitHubAPIError(
+                status_code=502,
+                code="github_invalid_response",
+                message="GitHub did not return the new comment's ID",
+            )
+        return comment_id
+
+    def update_comment(self, owner: str, repo: str, comment_id: int, body: str) -> bool:
+        """Replace a comment's text; False if the comment no longer exists."""
+        try:
+            self._json(
+                "PATCH",
+                f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+                json={"body": body},
+            )
+        except GitHubAPIError as exc:
+            if exc.code == "github_not_found":
+                return False
+            raise
+        return True
+
+
+def _check_status(response: httpx.Response) -> None:
+    """Raise the error a GitHub response stands for, judged by status and headers."""
+    if response.status_code < 300:
+        return
+    if response.status_code == 404:
+        raise GitHubAPIError(
+            status_code=404,
+            code="github_not_found",
+            message="GitHub repository, pull request, or file was not found",
+        )
+    if response.status_code == 429 or (
+        response.status_code == 403
+        and (
+            response.headers.get("X-RateLimit-Remaining") == "0"
+            or "Retry-After" in response.headers
+        )
+    ):
+        raise GitHubAPIError(
+            status_code=429,
+            code="github_rate_limited",
+            message="GitHub API rate limit exceeded",
+            transient=True,
+            retry_after=_retry_after(response),
+        )
+    if response.status_code in {401, 403}:
+        raise GitHubAPIError(
+            status_code=502,
+            code="github_authentication_failed",
+            message="GitHub rejected the configured credentials or permissions",
+        )
+    raise GitHubAPIError(
+        status_code=502,
+        code="github_api_error",
+        message=f"GitHub API returned status {response.status_code}",
+        transient=response.status_code >= 500,
+    )
 
 
 def verify_webhook_signature(body: bytes, signature: str | None, secret: str) -> bool:
