@@ -9,12 +9,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.analysis import rule_columns, rule_data
-from app.analysis_service import load_analysis_run, persist_analysis
+from app.analysis_service import load_analysis_run, persist_analysis, result_document
 from app.config_service import SOURCE, apply_import, export_config, plan_import
 from app.database import get_db
 from app.models import AnalysisRun, Project, Rule
 from app.schemas import (
     AnalysisRequest,
+    AnalysisResultDocument,
     AnalysisRunResponse,
     AnalysisRunSummaryResponse,
     ConfigImportPlan,
@@ -281,6 +282,23 @@ def list_analysis_runs(
 
 @router.get("/analysis-runs/{analysis_run_id}", response_model=AnalysisRunResponse)
 def get_analysis_run(analysis_run_id: int, db: DatabaseSession) -> AnalysisRun:
+    return _run_or_404(analysis_run_id, db)
+
+
+@router.get(
+    "/analysis-runs/{analysis_run_id}/result",
+    response_model=AnalysisResultDocument,
+    summary="Export a run's result as JSON",
+)
+def get_analysis_result(analysis_run_id: int, db: DatabaseSession) -> dict[str, Any]:
+    """The result in the engine's format (``schema_version`` 1), as the CLI writes it.
+
+    Source code is never stored, so it is not part of the result.
+    """
+    return result_document(_run_or_404(analysis_run_id, db))
+
+
+def _run_or_404(analysis_run_id: int, db: Session) -> AnalysisRun:
     run = load_analysis_run(db, analysis_run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Analysis run not found")

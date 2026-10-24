@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.config import Settings
+from app.database import SessionLocal
 from app.github import (
     ChangedPythonFiles,
     GitHubAPIError,
@@ -16,6 +17,7 @@ from app.github import (
     verify_webhook_signature,
 )
 from app.main import app
+from app.models import AnalysisRun
 from app.schemas import SourceFile
 from invariant.files import MAX_FILE_BYTES
 
@@ -39,6 +41,7 @@ class FakeGitHubClient:
         self.skipped: list[SkippedFile] = []
         self.truncated = False
         self.ignored = 0
+        self.base_sha: str | None = None
 
     def get_pull_request(
         self, owner: str, repo: str, pull_number: int
@@ -47,7 +50,9 @@ class FakeGitHubClient:
         if self.error:
             raise self.error
         assert (owner, repo) == ("iliyasnu", "invariant")
-        return PullRequestMetadata(number=pull_number, head_sha="abc123")
+        return PullRequestMetadata(
+            number=pull_number, head_sha="abc123", base_sha=self.base_sha
+        )
 
     def get_changed_python_files(
         self, owner: str, repo: str, pull_request: PullRequestMetadata
@@ -157,31 +162,52 @@ def test_manual_github_analysis_requires_project_configuration(client, github):
     assert github.pull_calls == 0
 
 
-def test_github_api_error_is_structured(client, github):
+@pytest.mark.parametrize(
+    "error",
+    [
+        GitHubAPIError(404, "github_not_found", "Not found"),
+        GitHubAPIError(503, "github_unavailable", "GitHub could not be reached"),
+        GitHubAPIError(429, "github_rate_limited", "GitHub API rate limit exceeded"),
+    ],
+)
+def test_a_github_failure_is_recorded_as_a_failed_run_not_a_pass(client, github, error):
     project = create_github_project(client)
-    github.error = GitHubAPIError(404, "github_not_found", "Not found")
+    create_rule(client, project["id"])
+    github.comment_enabled = True
+    github.error = error
 
     response = client.post(
         f"/projects/{project['id']}/analyze/github", json={"pull_number": 999}
     )
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "detail": {"code": "github_not_found", "message": "Not found"}
-    }
+    assert response.status_code == error.status_code
+    detail = response.json()["detail"]
+    assert (detail["code"], detail["message"]) == (error.code, error.message)
+    run = client.get(f"/analysis-runs/{detail['analysis_run_id']}").json()
+    assert (run["status"], run["outcome"], run["passed"]) == ("failed", None, None)
+    assert run["error"] == {"code": error.code, "message": error.message}
+    assert (run["pull_number"], run["violations"]) == (999, [])
+    assert run["finished_at"] is not None
+    assert github.comment_calls == 0
 
 
-def test_github_analysis_rejects_invalid_python_without_run(client, github):
+def test_github_analysis_of_invalid_python_is_incomplete(client, github):
     project = create_github_project(client)
-    github.files = [SourceFile(path="broken.py", content="def broken(:\n")]
+    create_rule(client, project["id"])
+    github.comment_enabled = True
+    github.files = [SourceFile(path="app/domain/broken.py", content="def broken(:\n")]
 
     response = client.post(
         f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "invalid_python"
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert response.status_code == 200
+    run = response.json()
+    assert (run["outcome"], run["passed"]) == ("incomplete", None)
+    assert [(item["code"], item["path"]) for item in run["violations"]] == [
+        ("syntax_error", "app/domain/broken.py")
+    ]
+    assert github.comment_calls == 0
 
 
 def test_optional_comment_failure_does_not_fail_analysis(client, github):
@@ -220,14 +246,21 @@ def test_incomplete_github_analysis_records_no_pass(client, github, skipped, tru
         f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
     )
 
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["code"] == "analysis_incomplete"
-    assert detail["skipped"] == [
-        {"path": item.path, "reason": item.reason} for item in skipped
-    ]
-    assert detail["file_list_truncated"] is truncated
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert response.status_code == 200
+    run = response.json()
+    assert (run["status"], run["outcome"], run["passed"]) == (
+        "completed",
+        "incomplete",
+        None,
+    )
+    expected = [(item.reason, item.path) for item in skipped]
+    if truncated:
+        expected.append(("file_list_truncated", None))
+    assert [(item["code"], item["path"]) for item in run["violations"]] == expected
+    assert all(item["kind"] == "error" for item in run["violations"])
+    assert run["files"]["skipped"] == len(skipped)
+    history = client.get(f"/projects/{project['id']}/analysis-runs").json()
+    assert [item["id"] for item in history] == [run["id"]]
     assert github.comment_calls == 0
 
 
@@ -242,18 +275,16 @@ def test_github_pr_without_python_files_is_not_applicable(client, github):
         f"/projects/{project['id']}/analyze/github", json={"pull_number": 12}
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "not_applicable"
-    assert response.json()["detail"]["ignored_files"] == 3
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert response.status_code == 200
+    run = response.json()
+    assert (run["outcome"], run["passed"]) == ("not_applicable", None)
+    assert (run["files"]["total"], run["files"]["ignored"]) == (3, 3)
     assert github.comment_calls == 0
 
 
-def test_webhook_accepts_not_applicable_pull_request_without_run(
-    client, github, monkeypatch
-):
+def test_webhook_records_a_not_applicable_pull_request(client, github, monkeypatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
-    project = create_github_project(client)
+    create_github_project(client)
     github.comment_enabled = True
     github.files = []
     body = json.dumps(pull_request_payload()).encode()
@@ -262,15 +293,19 @@ def test_webhook_accepts_not_applicable_pull_request_without_run(
         "/integrations/github/webhook", content=body, headers=signed_headers(body)
     )
 
-    assert response.status_code == 202
-    assert response.json()["status"] == "not_applicable"
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert response.status_code == 200
+    reply = response.json()
+    assert (reply["status"], reply["outcome"]) == ("analyzed", "not_applicable")
+    run = client.get(f"/analysis-runs/{reply['analysis_run_id']}").json()
+    assert (run["source"], run["passed"]) == ("github_webhook", None)
     assert github.comment_calls == 0
 
 
-def test_webhook_rejects_incomplete_analysis_without_run(client, github, monkeypatch):
+def test_webhook_records_an_incomplete_analysis_without_a_verdict(
+    client, github, monkeypatch
+):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
-    project = create_github_project(client)
+    create_github_project(client)
     github.comment_enabled = True
     github.skipped = [SkippedFile("app/domain/big.py", "too_large")]
     body = json.dumps(pull_request_payload()).encode()
@@ -279,9 +314,11 @@ def test_webhook_rejects_incomplete_analysis_without_run(client, github, monkeyp
         "/integrations/github/webhook", content=body, headers=signed_headers(body)
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "analysis_incomplete"
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert response.status_code == 200
+    assert (response.json()["status"], response.json()["outcome"]) == (
+        "analyzed",
+        "incomplete",
+    )
     assert github.comment_calls == 0
 
 
@@ -362,11 +399,13 @@ def test_excluded_changes_are_not_applicable_rather_than_a_pass(
         "/integrations/github/webhook", content=body, headers=signed_headers(body)
     )
 
-    assert manual.status_code == 422
-    assert manual.json()["detail"]["code"] == "not_applicable"
-    assert "No enabled rule applies" in manual.json()["detail"]["message"]
-    assert (webhook.status_code, webhook.json()["status"]) == (202, "not_applicable")
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert manual.status_code == 200
+    assert (manual.json()["outcome"], manual.json()["passed"]) == (
+        "not_applicable",
+        None,
+    )
+    assert manual.json()["files"]["excluded"] == 1
+    assert (webhook.status_code, webhook.json()["outcome"]) == (200, "not_applicable")
     assert github.comment_calls == 0
 
 
@@ -482,6 +521,7 @@ def test_webhook_analyzes_and_deduplicates_delivery(client, github, monkeypatch)
     assert second.json() == {
         "status": "duplicate",
         "analysis_run_id": first.json()["analysis_run_id"],
+        "outcome": "fail",
         "detail": None,
     }
     assert github.pull_calls == 1
@@ -490,9 +530,41 @@ def test_webhook_analyzes_and_deduplicates_delivery(client, github, monkeypatch)
     assert history[0]["source"] == "github_webhook"
 
 
+def test_github_runs_record_what_they_checked(client, github, monkeypatch):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    project = create_github_project(client)
+    create_rule(client, project["id"])
+    github.base_sha = "b" * 40
+    body = json.dumps(pull_request_payload()).encode()
+
+    reply = client.post(
+        "/integrations/github/webhook",
+        content=body,
+        headers=signed_headers(body, delivery="delivery-42"),
+    ).json()
+
+    run = client.get(f"/analysis-runs/{reply['analysis_run_id']}").json()
+    assert (
+        run["source"],
+        run["repository_owner"],
+        run["repository_name"],
+        run["pull_number"],
+        run["base_sha"],
+        run["head_sha"],
+    ) == ("github_webhook", "iliyasnu", "invariant", 12, "b" * 40, "abc123")
+    assert run["config"]["rules"][0]["key"] == "domain-isolation"
+    with SessionLocal() as session:
+        stored = session.get(AnalysisRun, run["id"])
+        assert stored.github_delivery_id == "delivery-42"
+
+
 def mock_github(handler) -> GitHubClient:
     settings = Settings(_env_file=None, github_api_url="https://api.github.test")
     return GitHubClient(settings, transport=httpx.MockTransport(handler))
+
+
+HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
+BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 
 
 def test_github_client_fetches_only_live_python_files():
@@ -500,7 +572,12 @@ def test_github_client_fetches_only_live_python_files():
         if request.url.path.endswith("/pulls/7"):
             return httpx.Response(
                 200,
-                json={"number": 7, "head": {"sha": "deadbeef"}, "changed_files": 3},
+                json={
+                    "number": 7,
+                    "head": {"sha": HEAD_SHA},
+                    "base": {"sha": BASE_SHA},
+                    "changed_files": 4,
+                },
             )
         if request.url.path.endswith("/pulls/7/files"):
             return httpx.Response(
@@ -509,21 +586,47 @@ def test_github_client_fetches_only_live_python_files():
                     {"filename": "app/service.py", "status": "modified"},
                     {"filename": "app/deleted.py", "status": "removed"},
                     {"filename": "README.md", "status": "modified"},
+                    {
+                        "filename": "app/new_name.py",
+                        "previous_filename": "app/old_name.py",
+                        "status": "renamed",
+                    },
                 ],
             )
         if request.url.path.endswith("/contents/app/service.py"):
-            assert request.url.params["ref"] == "deadbeef"
+            assert request.url.params["ref"] == HEAD_SHA
             return httpx.Response(200, content=b"import json\n")
+        if request.url.path.endswith("/contents/app/new_name.py"):
+            assert request.url.params["ref"] == HEAD_SHA
+            return httpx.Response(200, content=b"import os\n")
         raise AssertionError(f"Unexpected request: {request.url}")
 
     with mock_github(handler) as github:
         pull = github.get_pull_request("owner", "repo", 7)
         changed = github.get_changed_python_files("owner", "repo", pull)
 
-    assert pull.changed_files == 3
-    assert changed.files == [SourceFile(path="app/service.py", content="import json\n")]
+    assert (pull.changed_files, pull.head_sha, pull.base_sha) == (4, HEAD_SHA, BASE_SHA)
+    # A renamed file is checked under its new path.
+    assert changed.files == [
+        SourceFile(path="app/service.py", content="import json\n"),
+        SourceFile(path="app/new_name.py", content="import os\n"),
+    ]
     assert changed.ignored == 2
     assert changed.complete
+
+
+@pytest.mark.parametrize(
+    "head",
+    [{"sha": "deadbeef"}, {"sha": "../../evil"}, {"sha": HEAD_SHA + "0" * 40}, {}],
+)
+def test_github_client_rejects_a_head_that_is_not_a_commit_id(head):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"number": 7, "head": head})
+
+    with mock_github(handler) as github, pytest.raises(GitHubAPIError) as error:
+        github.get_pull_request("owner", "repo", 7)
+
+    assert error.value.code == "github_invalid_response"
 
 
 def test_github_client_reports_files_it_could_not_analyze():

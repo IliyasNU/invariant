@@ -11,12 +11,7 @@ from sqlalchemy.exc import (
 )
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
-from app.analysis import SourceSyntaxError
-from app.analysis_service import (
-    AnalysisIncomplete,
-    AnalysisNotApplicable,
-    ProjectGitHubNotConfigured,
-)
+from app.analysis_service import AnalysisFailed, ProjectGitHubNotConfigured
 from app.api import router
 from app.database import engine
 from app.github import GitHubAPIError
@@ -35,19 +30,16 @@ app.include_router(router)
 app.include_router(github_router)
 
 
-@app.exception_handler(SourceSyntaxError)
-def source_syntax_error_handler(
-    _request: Request, exc: SourceSyntaxError
-) -> JSONResponse:
+@app.exception_handler(AnalysisFailed)
+def analysis_failed_handler(_request: Request, exc: AnalysisFailed) -> JSONResponse:
+    # The upstream status and code, plus the failed run that records them.
     return JSONResponse(
-        status_code=422,
+        status_code=exc.error.status_code,
         content={
             "detail": {
-                "code": "invalid_python",
-                "path": exc.path,
-                "line": exc.line,
-                "column": exc.column,
-                "message": exc.message,
+                "code": exc.error.code,
+                "message": exc.error.message,
+                "analysis_run_id": exc.run.id,
             }
         },
     )
@@ -71,44 +63,6 @@ def github_not_configured_handler(
             "detail": {
                 "code": "github_not_configured",
                 "message": "Project has no GitHub owner/repository configuration",
-            }
-        },
-    )
-
-
-@app.exception_handler(AnalysisIncomplete)
-def analysis_incomplete_handler(
-    _request: Request, exc: AnalysisIncomplete
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": {
-                "code": "analysis_incomplete",
-                "message": (
-                    "Some changed Python files could not be analyzed; "
-                    "no result was recorded"
-                ),
-                "skipped": [
-                    {"path": item.path, "reason": item.reason} for item in exc.skipped
-                ],
-                "file_list_truncated": exc.truncated,
-            }
-        },
-    )
-
-
-@app.exception_handler(AnalysisNotApplicable)
-def analysis_not_applicable_handler(
-    _request: Request, exc: AnalysisNotApplicable
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": {
-                "code": "not_applicable",
-                "message": exc.message,
-                "ignored_files": exc.ignored,
             }
         },
     )

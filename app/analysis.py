@@ -13,8 +13,8 @@ from invariant.config import (
     ProjectSettings,
     RuleConfig,
 )
-from invariant.engine import Source, analyze
-from invariant.result import AnalysisResult
+from invariant.engine import Source, Unreadable, analyze
+from invariant.result import AnalysisResult, Diagnostic
 
 _RULE_MODELS = {
     "forbidden_import": ForbiddenImportRule,
@@ -26,6 +26,8 @@ _RULE_MODELS = {
 
 @dataclass
 class SourceSyntaxError(Exception):
+    """A file the v0.2 helper :func:`analyze_files` could not parse."""
+
     path: str
     line: int | None
     column: int | None
@@ -78,15 +80,34 @@ def project_settings(project: Project | None) -> ProjectSettings:
 
 
 def evaluate(
-    files: list[SourceFile], rules: list[Rule], project: Project | None = None
+    files: list[SourceFile],
+    rules: list[Rule],
+    project: Project | None = None,
+    *,
+    unreadable: list[Unreadable] | None = None,
+    ignored: int = 0,
+    errors: list[Diagnostic] | None = None,
 ) -> AnalysisResult:
-    result = analyze(
+    """Check ``files``; a file that cannot be analyzed makes it incomplete."""
+    return analyze(
         [Source(path=item.path, content=item.content) for item in files],
         [engine_rule(rule) for rule in rules],
         project_settings(project),
+        unreadable=unreadable or [],
+        ignored=ignored,
+        errors=errors or [],
     )
-    # The API has no incomplete result yet: a file that cannot be parsed
-    # rejects the whole request.
+
+
+def analyze_files(
+    files: list[SourceFile], rules: list[Rule]
+) -> list[ViolationResponse]:
+    """The forbidden-import violations of ``files``, in the v0.2 order.
+
+    As in v0.2, a file that cannot be parsed rejects the whole request.
+    """
+    by_key = {rule.key: rule for rule in rules}
+    result = evaluate(files, rules)
     if result.errors:
         error = result.errors[0]
         raise SourceSyntaxError(
@@ -95,15 +116,6 @@ def evaluate(
             column=error.column,
             message=error.message,
         )
-    return result
-
-
-def analyze_files(
-    files: list[SourceFile], rules: list[Rule]
-) -> list[ViolationResponse]:
-    """The forbidden-import violations of ``files``, in the v0.2 order."""
-    by_key = {rule.key: rule for rule in rules}
-    result = evaluate(files, rules)
     violations = [
         ViolationResponse(
             rule_id=by_key[item.rule_key].id,

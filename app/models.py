@@ -93,24 +93,83 @@ class Rule(Base):
 
 
 class AnalysisRun(Base):
+    """One analysis: its execution status, and its outcome once completed.
+
+    Runs recorded before v0.3 lack the counters, timing and configuration
+    snapshot, which are null for them.
+    """
+
     __tablename__ = "analysis_runs"
+    # A CHECK constraint accepts a NULL result, so no condition may yield NULL.
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed')",
+            name="ck_analysis_runs_status",
+        ),
+        CheckConstraint(
+            "(status = 'completed' AND COALESCE(outcome, '') IN "
+            "('pass', 'fail', 'incomplete', 'not_applicable')) "
+            "OR (status <> 'completed' AND outcome IS NULL)",
+            name="ck_analysis_runs_outcome",
+        ),
+        CheckConstraint(
+            "(COALESCE(outcome, '') = 'pass' AND passed IS NOT NULL AND passed = true) "
+            "OR (COALESCE(outcome, '') = 'fail' AND passed IS NOT NULL "
+            "AND passed = false) "
+            "OR (COALESCE(outcome, '') NOT IN ('pass', 'fail') AND passed IS NULL)",
+            name="ck_analysis_runs_passed",
+        ),
+        CheckConstraint(
+            "(status = 'failed') = (error_code IS NOT NULL)",
+            name="ck_analysis_runs_error",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     source: Mapped[str] = mapped_column(String(30))
-    status: Mapped[str] = mapped_column(String(30), default="completed")
-    passed: Mapped[bool] = mapped_column(Boolean)
+    # queued, running, completed or failed: whether the analysis ran.
+    status: Mapped[str] = mapped_column(String(30))
+    # pass, fail, incomplete or not_applicable: what a completed run found.
+    outcome: Mapped[str | None] = mapped_column(String(20))
+    # True only for pass, False only for fail.
+    passed: Mapped[bool | None] = mapped_column(Boolean)
+    fail_on: Mapped[str | None] = mapped_column(String(10))
     pull_number: Mapped[int | None] = mapped_column(Integer)
     repository_owner: Mapped[str | None] = mapped_column(String(100))
     repository_name: Mapped[str | None] = mapped_column(String(100))
     github_delivery_id: Mapped[str | None] = mapped_column(
         String(100), unique=True, index=True
     )
+    base_sha: Mapped[str | None] = mapped_column(String(64))
+    head_sha: Mapped[str | None] = mapped_column(String(64))
+    files_total: Mapped[int | None] = mapped_column(Integer)
+    files_eligible: Mapped[int | None] = mapped_column(Integer)
     files_analyzed: Mapped[int] = mapped_column(Integer)
+    files_excluded: Mapped[int | None] = mapped_column(Integer)
+    files_skipped: Mapped[int | None] = mapped_column(Integer)
+    files_ignored: Mapped[int | None] = mapped_column(Integer)
+    rules_total: Mapped[int | None] = mapped_column(Integer)
+    # The number of enabled rules (its v0.2 name).
     rules_evaluated: Mapped[int] = mapped_column(Integer)
+    # Pairs of (analyzed file, enabled rule that applies to it).
+    evaluations: Mapped[int | None] = mapped_column(Integer)
     violation_count: Mapped[int] = mapped_column(Integer)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    warning_count: Mapped[int] = mapped_column(Integer, default=0)
+    analysis_error_count: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    engine_version: Mapped[str | None] = mapped_column(String(50))
+    # The project settings and rules that were checked, and their SHA-256.
+    config_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    config_hash: Mapped[str | None] = mapped_column(String(64))
+    # Why a failed run did not complete; never a token or an upstream payload.
+    error_code: Mapped[str | None] = mapped_column(String(50))
+    error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -122,6 +181,39 @@ class AnalysisRun(Base):
         passive_deletes=True,
         order_by="AnalysisViolation.id",
     )
+
+    @property
+    def file_counts(self) -> dict[str, int | None]:
+        return {
+            "total": self.files_total,
+            "eligible": self.files_eligible,
+            "analyzed": self.files_analyzed,
+            "excluded": self.files_excluded,
+            "skipped": self.files_skipped,
+            "ignored": self.files_ignored,
+        }
+
+    @property
+    def rule_counts(self) -> dict[str, int | None]:
+        return {
+            "total": self.rules_total,
+            "enabled": self.rules_evaluated,
+            "evaluations": self.evaluations,
+        }
+
+    @property
+    def diagnostic_counts(self) -> dict[str, int]:
+        return {
+            "errors": self.error_count,
+            "warnings": self.warning_count,
+            "analysis_errors": self.analysis_error_count,
+        }
+
+    @property
+    def error(self) -> dict[str, str | None] | None:
+        if self.error_code is None:
+            return None
+        return {"code": self.error_code, "message": self.error_message}
 
 
 class AnalysisViolation(Base):

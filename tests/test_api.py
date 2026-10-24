@@ -152,7 +152,11 @@ def test_analysis_returns_deterministic_violations(client):
     history = client.get(f"/projects/{project['id']}/analysis-runs")
     assert history.status_code == 200
     assert history.json() == [
-        {key: value for key, value in result.items() if key != "violations"}
+        {
+            key: value
+            for key, value in result.items()
+            if key not in {"violations", "config"}
+        }
     ]
 
     detail = client.get(f"/analysis-runs/{result['id']}")
@@ -162,33 +166,88 @@ def test_analysis_returns_deterministic_violations(client):
     assert client.get("/projects/999/analysis-runs").status_code == 404
 
 
-def test_analysis_rejects_invalid_python(client):
+def test_invalid_python_makes_the_run_incomplete_not_a_pass(client):
     project = create_project(client)
+    client.post(
+        f"/projects/{project['id']}/rules",
+        json={"name": "Domain isolation", "forbidden_imports": ["app.db"]},
+    )
     response = client.post(
         f"/projects/{project['id']}/analyze",
         json={"files": [{"path": "broken.py", "content": "def broken(:\n"}]},
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "invalid_python"
-    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+    assert response.status_code == 200
+    run = response.json()
+    assert (run["status"], run["outcome"], run["passed"]) == (
+        "completed",
+        "incomplete",
+        None,
+    )
+    [error] = run["violations"]
+    assert (error["kind"], error["code"], error["path"], error["line"]) == (
+        "error",
+        "syntax_error",
+        "broken.py",
+        1,
+    )
+    assert run["files"] == {
+        "total": 1,
+        "eligible": 1,
+        "analyzed": 0,
+        "excluded": 0,
+        "skipped": 1,
+        "ignored": 0,
+    }
+    assert run["summary"] == {"errors": 0, "warnings": 0, "analysis_errors": 1}
+    assert [
+        item["id"]
+        for item in client.get(f"/projects/{project['id']}/analysis-runs").json()
+    ] == [run["id"]]
 
 
-def test_analysis_rejects_too_complex_python(client):
+def test_a_broken_file_does_not_hide_violations_in_the_others(client):
+    project = create_project(client)
+    client.post(
+        f"/projects/{project['id']}/rules",
+        json={"name": "Domain isolation", "forbidden_imports": ["app.db"]},
+    )
+
+    run = client.post(
+        f"/projects/{project['id']}/analyze",
+        json={
+            "files": [
+                {"path": "app/a.py", "content": "import app.db\n"},
+                {"path": "app/b.py", "content": "def broken(:\n"},
+            ]
+        },
+    ).json()
+
+    # A blocking violation fails the run even though a file was not analyzed.
+    assert (run["outcome"], run["passed"]) == ("fail", False)
+    assert [(item["kind"], item["path"]) for item in run["violations"]] == [
+        ("violation", "app/a.py"),
+        ("error", "app/b.py"),
+    ]
+    assert run["violation_count"] == 1
+
+
+def test_too_complex_python_is_reported_as_such(client):
     project = create_project(client)
     response = client.post(
         f"/projects/{project['id']}/analyze",
         json={"files": [{"path": "deep.py", "content": "x = " + "-" * 200_000 + "1"}]},
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == {
-        "code": "invalid_python",
-        "path": "deep.py",
-        "line": None,
-        "column": None,
-        "message": "Python source is too complex to parse",
-    }
+    assert response.status_code == 200
+    run = response.json()
+    assert run["outcome"] == "incomplete"
+    [error] = run["violations"]
+    assert (error["code"], error["path"], error["message"]) == (
+        "too_complex",
+        "deep.py",
+        "Python source is too complex to parse",
+    )
 
 
 def analyze(client, project_id, content="import json\n"):
