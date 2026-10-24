@@ -131,6 +131,7 @@ Requirements:
 
 ```bash
 cp .env.example .env
+echo INVARIANT_LOCAL_ONLY=true >> .env   # or set INVARIANT_API_KEY in .env
 uv sync --dev
 docker compose up -d db
 uv run alembic upgrade head
@@ -163,6 +164,9 @@ by default, avoiding a common conflict with host PostgreSQL installations. Set
 | `GITHUB_API_URL` | `https://api.github.com` | Override for GitHub Enterprise Server or tests |
 | `INVARIANT_PUBLIC_URL` | unset | Where the API is reachable, for the link from a PR comment to its run |
 | `APP_PORT` | `8000` | Host port used by the Compose app service |
+| `INVARIANT_API_KEY` | unset | The API's key, at least 32 characters; see [API key and exposure](#api-key-and-exposure) |
+| `INVARIANT_LOCAL_ONLY` | `false` | Start without a key, for an API only this machine can reach |
+| `INVARIANT_CORS_ORIGINS` | unset | Browser origins allowed to call the API, comma-separated |
 | `INVARIANT_HOST` | `127.0.0.1` | Where `python -m app.server` listens (`0.0.0.0` in the image) |
 | `INVARIANT_PORT` | `8000` | Its port |
 | `INVARIANT_LOG_FORMAT` | `json` | `json`: one object per line; `text`: for a terminal |
@@ -178,6 +182,8 @@ the worker:
 
 ```bash
 cp .env.example .env
+# Set INVARIANT_API_KEY in .env to a random value, such as the output of:
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 docker compose up --build
 ```
 
@@ -188,9 +194,37 @@ only after it succeeded. All of them use one image, run as an unprivileged
 `db:5432`. On `docker compose stop` the worker finishes the analysis it is
 running (within two minutes) before it exits.
 
-Both published ports bind to `127.0.0.1` only, because the API has no
-authentication and the database uses local example credentials. Put a reverse
-proxy or tunnel in front of the app to receive GitHub webhooks.
+Both published ports bind to `127.0.0.1` only: the database uses local
+example credentials, and the API is meant to be published through a
+TLS-terminating reverse proxy or tunnel, which GitHub's webhooks also need.
+
+## API key and exposure
+
+- **The key.** `INVARIANT_API_KEY`, at least 32 characters, protects the
+  whole API. Clients send it as `Authorization: Bearer <key>`; it is compared
+  in constant time, never read from a URL and never logged. Generate one with
+  `python -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+- **No open service by mistake.** Without a key, the API refuses to start
+  (exit code 2, or `Application startup failed` under plain uvicorn) unless
+  `INVARIANT_LOCAL_ONLY=true` says that only this machine can reach it. In
+  local-only mode the API takes requests without a key and logs a warning at
+  startup; the Compose stack publishes it on `127.0.0.1` only, so local-only
+  mode suits it as long as that binding stays. A key, once set, is required
+  in either mode.
+- **Browsers.** By default the API sends no CORS headers, so web pages on
+  other origins cannot call it. `INVARIANT_CORS_ORIGINS` lists the origins
+  that may (comma-separated; `*` is refused). Credentials stay a bearer
+  header, never cookies.
+- **HTTPS.** Invariant serves plain HTTP: put it behind a proxy that
+  terminates TLS before exposing it. It warns at startup when
+  `INVARIANT_PUBLIC_URL` is a plain `http://` address other than loopback.
+- **GitHub token.** Give `GITHUB_TOKEN` the least it needs: a fine-grained
+  token for the analyzed repositories only, with *Contents: read* and *Pull
+  requests: read*, and *Pull requests: write* only if Invariant comments
+  (`GITHUB_POST_PR_COMMENT=true`). It is sent only to `GITHUB_API_URL`.
+- **Secrets** come from the environment only: `.env.example` holds empty
+  placeholders, and neither the token, the webhook secret nor the API key is
+  stored in the database, returned by the API or written to the logs.
 
 Useful commands:
 
@@ -222,10 +256,22 @@ value is stored.
 
 ## API
 
+Every route of the API below requires the [API key](#api-key-and-exposure),
+sent as a bearer token. The examples read it from the shell:
+
+```bash
+export INVARIANT_API_KEY=...   # the key the API was started with
+AUTH="Authorization: Bearer $INVARIANT_API_KEY"
+```
+
+Without it, or with a wrong one, the answer is `401 unauthorized`.
+`/health`, `/db-health`, the documentation at `/docs` and the GitHub webhook,
+which checks GitHub's own signature, need no key.
+
 ### Projects and rules
 
 ```bash
-curl -X POST http://127.0.0.1:8000/projects \
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects \
   -H "Content-Type: application/json" \
   -d '{
     "name": "payments",
@@ -234,8 +280,8 @@ curl -X POST http://127.0.0.1:8000/projects \
     "github_repo": "payments"
   }'
 
-curl http://127.0.0.1:8000/projects
-curl http://127.0.0.1:8000/projects/1
+curl -H "$AUTH" http://127.0.0.1:8000/projects
+curl -H "$AUTH" http://127.0.0.1:8000/projects/1
 ```
 
 Lists are paginated: `GET /projects` and `GET /projects/{id}/rules` return
@@ -248,7 +294,7 @@ carries the total number of matching items in an `X-Total-Count` header.
 project with GitHub:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8000/projects/1 \
+curl -H "$AUTH" -X PATCH http://127.0.0.1:8000/projects/1 \
   -H "Content-Type: application/json" \
   -d '{"github_owner":"example-org","github_repo":"payments"}'
 ```
@@ -262,7 +308,7 @@ Rules of every type share `key`, `name`, `enabled`, `severity`,
 bodies keep working:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/projects/1/rules \
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/rules \
   -H "Content-Type: application/json" \
   -d '{
     "name":"domain isolation",
@@ -270,15 +316,15 @@ curl -X POST http://127.0.0.1:8000/projects/1/rules \
     "forbidden_imports":["app.infrastructure"]
   }'
 
-curl -X POST http://127.0.0.1:8000/projects/1/rules \
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/rules \
   -H "Content-Type: application/json" \
   -d '{"key":"small-files","rule_type":"max_file_lines","max_lines":400,"severity":"warning"}'
 
-curl http://127.0.0.1:8000/projects/1/rules
-curl http://127.0.0.1:8000/projects/1/rules/1
-curl -X PATCH http://127.0.0.1:8000/projects/1/rules/1 \
+curl -H "$AUTH" http://127.0.0.1:8000/projects/1/rules
+curl -H "$AUTH" http://127.0.0.1:8000/projects/1/rules/1
+curl -H "$AUTH" -X PATCH http://127.0.0.1:8000/projects/1/rules/1 \
   -H "Content-Type: application/json" -d '{"enabled":false}'
-curl -X DELETE http://127.0.0.1:8000/projects/1/rules/1
+curl -H "$AUTH" -X DELETE http://127.0.0.1:8000/projects/1/rules/1
 ```
 
 Keys and names are unique within a project (`409` otherwise). A rule is
@@ -293,9 +339,9 @@ A project's settings and rules can be exported as an
 [`invariant.toml`](docs/configuration.md) file and imported back:
 
 ```bash
-curl http://127.0.0.1:8000/projects/1/config -o invariant.toml
+curl -H "$AUTH" http://127.0.0.1:8000/projects/1/config -o invariant.toml
 
-curl -X POST http://127.0.0.1:8000/projects/1/config/import \
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/config/import \
   -H "Content-Type: application/json" \
   -d "$(jq -n --rawfile content invariant.toml '{content: $content, dry_run: true}')"
 ```
@@ -310,7 +356,7 @@ for example `rules[0].max_lines`.
 ### Direct code analysis
 
 ```bash
-curl -X POST http://127.0.0.1:8000/projects/1/analyze \
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/analyze \
   -H "Content-Type: application/json" \
   -d '{
     "files":[{
@@ -404,7 +450,7 @@ refused; a project without applicable rules no longer passes.
 The project must have GitHub owner/repository configuration:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/projects/1/analyze/github \
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/analyze/github \
   -H "Content-Type: application/json" \
   -d '{"pull_number":12}'
 ```
@@ -442,12 +488,12 @@ payloads:
 ### Analysis history
 
 ```bash
-curl http://127.0.0.1:8000/projects/1/analysis-runs
-curl "http://127.0.0.1:8000/projects/1/analysis-runs?limit=20&offset=20"
-curl "http://127.0.0.1:8000/projects/1/analysis-runs?outcome=fail&source=github_webhook"
-curl http://127.0.0.1:8000/analysis-runs/42
-curl "http://127.0.0.1:8000/analysis-runs/42/diagnostics?kind=violation&severity=error&limit=50"
-curl http://127.0.0.1:8000/projects/1/stats
+curl -H "$AUTH" http://127.0.0.1:8000/projects/1/analysis-runs
+curl -H "$AUTH" "http://127.0.0.1:8000/projects/1/analysis-runs?limit=20&offset=20"
+curl -H "$AUTH" "http://127.0.0.1:8000/projects/1/analysis-runs?outcome=fail&source=github_webhook"
+curl -H "$AUTH" http://127.0.0.1:8000/analysis-runs/42
+curl -H "$AUTH" "http://127.0.0.1:8000/analysis-runs/42/diagnostics?kind=violation&severity=error&limit=50"
+curl -H "$AUTH" http://127.0.0.1:8000/projects/1/stats
 ```
 
 The project endpoint returns newest-first summaries, 50 per page by default
@@ -721,9 +767,9 @@ uv run python -m app.server
 - Direct analysis requests are answered synchronously; GitHub analyses run in
   the worker.
 - Dynamic imports (`importlib.import_module`, `__import__`) are not detected.
-- The service has no authentication, organizations, authorization model, web
-  UI, or deployment hardening yet. Do not expose it publicly without an
-  appropriate trusted network boundary.
+- One API key protects the API: there are no users, organizations or
+  roles, and anyone with the key can do everything. Rotating it means
+  restarting the API with the new key.
 - Repository-wide unchanged files are not analyzed; v0.2 evaluates changed PR
   files only.
 - CI checks the code, the migrations and the tests on SQLite and PostgreSQL,
