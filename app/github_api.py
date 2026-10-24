@@ -8,13 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.analysis_service import analyze_github_pull_request
+from app.analysis_service import enqueue_github_analysis
 from app.config import Settings
 from app.database import get_db
-from app.github import GitHubClient, get_github_client, verify_webhook_signature
+from app.github import verify_webhook_signature
 from app.models import AnalysisRun, Project
 from app.schemas import (
-    AnalysisRunResponse,
+    AnalysisRunSummaryResponse,
     GitHubAnalysisRequest,
     PullRequestEvent,
     WebhookResponse,
@@ -22,7 +22,6 @@ from app.schemas import (
 
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_db)]
-GitHubDependency = Annotated[GitHubClient, Depends(get_github_client)]
 
 
 async def raw_request_body(request: Request) -> bytes:
@@ -40,29 +39,32 @@ def _project_or_404(project_id: int, db: Session) -> Project:
 
 
 @router.post(
-    "/projects/{project_id}/analyze/github", response_model=AnalysisRunResponse
+    "/projects/{project_id}/analyze/github",
+    response_model=AnalysisRunSummaryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def analyze_github_project(
-    project_id: int,
-    payload: GitHubAnalysisRequest,
-    db: DatabaseSession,
-    github: GitHubDependency,
+    project_id: int, payload: GitHubAnalysisRequest, db: DatabaseSession
 ) -> AnalysisRun:
+    """Queue an analysis of the pull request for the worker.
+
+    The run is returned with status ``queued``; poll ``GET /analysis-runs/{id}``
+    until it is ``completed`` or ``failed``. Each request queues a new run, so
+    the same commit can be analyzed again.
+    """
     project = _project_or_404(project_id, db)
-    return analyze_github_pull_request(
-        db,
-        project,
-        payload.pull_number,
-        github,
-        source="github_pr",
-    )
+    return enqueue_github_analysis(db, project, payload.pull_number, source="github_pr")
 
 
-@router.post("/integrations/github/webhook", response_model=WebhookResponse)
+@router.post(
+    "/integrations/github/webhook",
+    response_model=WebhookResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={200: {"model": WebhookResponse, "description": "A repeated delivery"}},
+)
 def github_webhook(
     body: RawBody,
     db: DatabaseSession,
-    github: GitHubDependency,
     github_event: Annotated[str | None, Header(alias="X-GitHub-Event")] = None,
     github_delivery: Annotated[str | None, Header(alias="X-GitHub-Delivery")] = None,
     github_signature: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
@@ -171,12 +173,13 @@ def github_webhook(
             },
         )
 
+    # Committed before the reply: once GitHub sees 202, the job survives a
+    # restart of the API.
     try:
-        run = analyze_github_pull_request(
+        run = enqueue_github_analysis(
             db,
             project,
             pull_number,
-            github,
             source="github_webhook",
             github_delivery_id=github_delivery,
         )
@@ -189,13 +192,12 @@ def github_webhook(
             return _duplicate(existing)
         raise
 
-    return WebhookResponse(
-        status="analyzed", analysis_run_id=run.id, outcome=run.outcome
-    )
+    return WebhookResponse(status="queued", analysis_run_id=run.id)
 
 
-def _duplicate(run: AnalysisRun) -> WebhookResponse:
-    # A repeated delivery gets the run its first delivery recorded.
-    return WebhookResponse(
+def _duplicate(run: AnalysisRun) -> JSONResponse:
+    # A repeated delivery gets the run its first delivery queued.
+    response = WebhookResponse(
         status="duplicate", analysis_run_id=run.id, outcome=run.outcome
     )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=response.model_dump())

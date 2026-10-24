@@ -11,7 +11,7 @@ from sqlalchemy.exc import (
 )
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
-from app.analysis_service import AnalysisFailed, ProjectGitHubNotConfigured
+from app.analysis_service import ProjectGitHubNotConfigured
 from app.api import router
 from app.database import engine
 from app.github import GitHubAPIError
@@ -28,21 +28,6 @@ app = FastAPI(
 )
 app.include_router(router)
 app.include_router(github_router)
-
-
-@app.exception_handler(AnalysisFailed)
-def analysis_failed_handler(_request: Request, exc: AnalysisFailed) -> JSONResponse:
-    # The upstream status and code, plus the failed run that records them.
-    return JSONResponse(
-        status_code=exc.error.status_code,
-        content={
-            "detail": {
-                "code": exc.error.code,
-                "message": exc.error.message,
-                "analysis_run_id": exc.run.id,
-            }
-        },
-    )
 
 
 @app.exception_handler(GitHubAPIError)

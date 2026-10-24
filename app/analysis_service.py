@@ -1,16 +1,16 @@
 """Run analyses and record them, whatever their outcome.
 
-Every attempt is recorded as a run. A completed run has an outcome: pass,
-fail, incomplete (some file could not be analyzed) or not_applicable (nothing
-was checked). A run that could not complete, such as a GitHub failure, is
-recorded as failed with a safe error code and no outcome. A run and its
-diagnostics are written in one transaction.
+Every analysis is a run. A completed run has an outcome: pass, fail,
+incomplete (some file could not be analyzed) or not_applicable (nothing was
+checked). Direct analyses complete at once; GitHub analyses are queued and run
+by the worker (``app.worker``), which records a run that could not complete as
+failed, with a safe error code and no outcome. A run and its diagnostics are
+written in one transaction.
 """
 
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,21 +24,13 @@ from app.schemas import SourceFile
 from invariant import __version__
 from invariant.config import SCHEMA_VERSION, InvariantConfig
 from invariant.engine import Unreadable
-from invariant.result import RESULT_SCHEMA_VERSION, AnalysisResult, Diagnostic, Outcome
+from invariant.result import RESULT_SCHEMA_VERSION, AnalysisResult, Diagnostic
 
 logger = logging.getLogger(__name__)
 
 
 class ProjectGitHubNotConfigured(Exception):
     pass
-
-
-@dataclass
-class AnalysisFailed(Exception):
-    """The analysis could not complete; ``run`` records the failure."""
-
-    run: AnalysisRun
-    error: GitHubAPIError
 
 
 def _now() -> datetime:
@@ -62,54 +54,28 @@ def config_snapshot(project: Project, rules: list[Rule]) -> tuple[dict, str]:
     return snapshot, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _new_run(
-    project: Project,
-    rules: list[Rule],
-    *,
-    source: str,
-    started_at: datetime,
-    pull_number: int | None,
-    github_delivery_id: str | None,
-    pull_request: PullRequestMetadata | None,
-) -> AnalysisRun:
-    snapshot, digest = config_snapshot(project, rules)
-    finished_at = _now()
-    return AnalysisRun(
-        project_id=project.id,
-        source=source,
-        pull_number=pull_number,
-        repository_owner=project.github_owner,
-        repository_name=project.github_repo,
-        github_delivery_id=github_delivery_id,
-        base_sha=pull_request.base_sha if pull_request else None,
-        head_sha=pull_request.head_sha if pull_request else None,
-        started_at=started_at,
-        finished_at=finished_at,
-        duration_ms=round((finished_at - started_at).total_seconds() * 1000),
-        engine_version=__version__,
-        config_snapshot=snapshot,
-        config_hash=digest,
-    )
-
-
-def _save(db: Session, run: AnalysisRun) -> AnalysisRun:
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
-
-
-def _record_result(
-    db: Session,
+def _complete(
+    run: AnalysisRun,
     project: Project,
     rules: list[Rule],
     result: AnalysisResult,
-    **context,
-) -> AnalysisRun:
-    rule_ids = {rule.key: rule.id for rule in rules}
-    violations = result.violations
-    run = _new_run(project, rules, **context)
+    *,
+    started_at: datetime,
+    pull_request: PullRequestMetadata | None = None,
+) -> None:
+    """Record ``result`` in ``run``, with what was checked and when."""
+    snapshot, digest = config_snapshot(project, rules)
+    finished_at = _now()
+    run.repository_owner = project.github_owner
+    run.repository_name = project.github_repo
+    if pull_request is not None:
+        run.base_sha, run.head_sha = pull_request.base_sha, pull_request.head_sha
+    run.started_at, run.finished_at = started_at, finished_at
+    run.duration_ms = round((finished_at - started_at).total_seconds() * 1000)
+    run.engine_version = __version__
+    run.config_snapshot, run.config_hash = snapshot, digest
     run.status = "completed"
+    run.error_code = run.error_message = None
     run.outcome = result.outcome.value
     run.passed = result.passed
     run.fail_on = result.fail_on
@@ -120,10 +86,12 @@ def _record_result(
     run.rules_total = result.rules_total
     run.rules_evaluated = result.rules_enabled
     run.evaluations = result.evaluations
+    violations = result.violations
     run.violation_count = len(violations)
     run.error_count = sum(item.severity == "error" for item in violations)
     run.warning_count = sum(item.severity == "warning" for item in violations)
     run.analysis_error_count = len(result.errors)
+    rule_ids = {rule.key: rule.id for rule in rules}
     run.violations = [
         AnalysisViolation(
             kind=item.kind,
@@ -141,23 +109,26 @@ def _record_result(
         )
         for item in result.diagnostics
     ]
-    return _save(db, run)
 
 
-def _record_failure(
-    db: Session,
-    project: Project,
-    rules: list[Rule],
-    error: GitHubAPIError,
-    **context,
-) -> AnalysisRun:
-    run = _new_run(project, rules, **context)
+def fail_run(run: AnalysisRun, code: str, message: str) -> None:
+    """Record that ``run`` could not complete. ``message`` is Invariant's own."""
     run.status = "failed"
-    run.files_analyzed = run.rules_evaluated = run.violation_count = 0
-    run.error_code = error.code
-    # GitHubAPIError messages are written by Invariant, never copied from GitHub.
-    run.error_message = error.message
-    return _save(db, run)
+    run.outcome = run.passed = None
+    run.error_code, run.error_message = code, message
+    run.finished_at = _now()
+    if run.started_at is not None:
+        run.duration_ms = round(
+            (run.finished_at - run.started_at).total_seconds() * 1000
+        )
+    run.lease_expires_at = run.locked_by = run.next_attempt_at = None
+
+
+def _save(db: Session, run: AnalysisRun) -> AnalysisRun:
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 def persist_analysis(
@@ -169,53 +140,68 @@ def persist_analysis(
 ) -> AnalysisRun:
     started_at = _now()
     rules = _project_rules(db, project)
-    return _record_result(
-        db,
-        project,
-        rules,
-        evaluate(files, rules, project),
-        source=source,
-        started_at=started_at,
-        pull_number=None,
-        github_delivery_id=None,
-        pull_request=None,
+    run = AnalysisRun(project_id=project.id, source=source, attempts=1)
+    _complete(
+        run, project, rules, evaluate(files, rules, project), started_at=started_at
     )
+    return _save(db, run)
 
 
-def analyze_github_pull_request(
+def enqueue_github_analysis(
     db: Session,
     project: Project,
     pull_number: int,
-    github: GitHubClient,
     *,
     source: str,
     github_delivery_id: str | None = None,
 ) -> AnalysisRun:
+    """Accept a pull request analysis durably; the worker runs it.
+
+    A repeated ``github_delivery_id`` raises IntegrityError: deliveries are
+    unique.
+    """
     if not project.github_owner or not project.github_repo:
         raise ProjectGitHubNotConfigured
+    run = AnalysisRun(
+        project_id=project.id,
+        source=source,
+        status="queued",
+        pull_number=pull_number,
+        repository_owner=project.github_owner,
+        repository_name=project.github_repo,
+        github_delivery_id=github_delivery_id,
+        files_analyzed=0,
+        rules_evaluated=0,
+        violation_count=0,
+    )
+    return _save(db, run)
 
+
+def execute_github_analysis(
+    db: Session, run: AnalysisRun, github: GitHubClient
+) -> None:
+    """Analyze the pull request of a claimed run and record the result in it.
+
+    Nothing is committed: the worker commits only while it still holds the
+    run. A GitHubAPIError propagates, for the worker to retry or fail the run.
+    """
     started_at = _now()
+    run.started_at = started_at
+    project = db.get(Project, run.project_id)
+    if project is None or not project.github_owner or not project.github_repo:
+        raise GitHubAPIError(
+            status_code=409,
+            code="github_not_configured",
+            message="Project has no GitHub owner/repository configuration",
+        )
     rules = _project_rules(db, project)
-    pull_request = None
-    context = {
-        "source": source,
-        "started_at": started_at,
-        "pull_number": pull_number,
-        "github_delivery_id": github_delivery_id,
-    }
-    try:
-        pull_request = github.get_pull_request(
-            project.github_owner, project.github_repo, pull_number
-        )
-        changed = github.get_changed_python_files(
-            project.github_owner, project.github_repo, pull_request
-        )
-    except GitHubAPIError as exc:
-        run = _record_failure(
-            db, project, rules, exc, pull_request=pull_request, **context
-        )
-        raise AnalysisFailed(run=run, error=exc) from exc
-
+    assert run.pull_number is not None
+    pull_request = github.get_pull_request(
+        project.github_owner, project.github_repo, run.pull_number
+    )
+    changed = github.get_changed_python_files(
+        project.github_owner, project.github_repo, pull_request
+    )
     errors = []
     if changed.truncated:
         errors.append(
@@ -237,22 +223,23 @@ def analyze_github_pull_request(
         ignored=changed.ignored,
         errors=errors,
     )
-    run = _record_result(
-        db, project, rules, result, pull_request=pull_request, **context
+    _complete(
+        run, project, rules, result, started_at=started_at, pull_request=pull_request
     )
-    # Only a verdict is announced: a pass would claim a check that did not run.
-    if result.outcome in (Outcome.PASS, Outcome.FAIL):
-        _post_feedback(github, project, run)
-    return run
 
 
-def _post_feedback(github: GitHubClient, project: Project, run: AnalysisRun) -> None:
-    if (
-        not github.comment_enabled
-        or not project.github_owner
-        or not project.github_repo
-        or run.pull_number is None
-    ):
+def post_feedback(github: GitHubClient, run: AnalysisRun) -> None:
+    """Comment on the pull request when the run has a verdict and it is enabled.
+
+    Only a verdict is announced: a pass would claim a check that did not run.
+    """
+    if run.outcome in ("pass", "fail"):
+        _post_feedback(github, run)
+
+
+def _post_feedback(github: GitHubClient, run: AnalysisRun) -> None:
+    owner, repo = run.repository_owner, run.repository_name
+    if not github.comment_enabled or not owner or not repo or run.pull_number is None:
         return
 
     violations = [item for item in run.violations if item.kind == "violation"]
@@ -279,9 +266,7 @@ def _post_feedback(github: GitHubClient, project: Project, run: AnalysisRun) -> 
         )
 
     try:
-        github.post_pull_request_comment(
-            project.github_owner, project.github_repo, run.pull_number, body
-        )
+        github.post_pull_request_comment(owner, repo, run.pull_number, body)
     except GitHubAPIError as exc:
         logger.warning("Could not post optional GitHub PR feedback: %s", exc.code)
 

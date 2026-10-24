@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import re
-from collections.abc import Generator
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, Self
 from urllib.parse import quote
@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.schemas import SourceFile
+from invariant import __version__
 from invariant.files import MAX_FILE_BYTES, decode_source
 
 MAX_FILE_PAGES = 30
@@ -54,6 +55,21 @@ class GitHubAPIError(Exception):
     status_code: int
     code: str
     message: str
+    # Worth retrying later: the network, a rate limit, a GitHub server error.
+    transient: bool = False
+    # Seconds GitHub asked to wait before the next request, if it said.
+    retry_after: float | None = None
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """The wait GitHub asks for: Retry-After, or until X-RateLimit-Reset."""
+    retry_after = response.headers.get("Retry-After", "")
+    if retry_after.isdigit():
+        return float(retry_after)
+    reset = response.headers.get("X-RateLimit-Reset", "")
+    if reset.isdigit():
+        return max(0.0, int(reset) - time.time())
+    return None
 
 
 class GitHubClient:
@@ -66,7 +82,7 @@ class GitHubClient:
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "invariant/0.2",
+            "User-Agent": f"invariant/{__version__}",
         }
         if settings.github_token:
             headers["Authorization"] = f"Bearer {settings.github_token}"
@@ -98,6 +114,7 @@ class GitHubClient:
                 status_code=503,
                 code="github_unavailable",
                 message="GitHub could not be reached",
+                transient=True,
             ) from exc
 
         if response.status_code < 400:
@@ -119,6 +136,8 @@ class GitHubClient:
                 status_code=429,
                 code="github_rate_limited",
                 message="GitHub API rate limit exceeded",
+                transient=True,
+                retry_after=_retry_after(response),
             )
         if response.status_code in {401, 403}:
             raise GitHubAPIError(
@@ -130,6 +149,7 @@ class GitHubClient:
             status_code=502,
             code="github_api_error",
             message=f"GitHub API returned status {response.status_code}",
+            transient=response.status_code >= 500,
         )
 
     def _json(self, path: str, **kwargs: Any) -> Any:
@@ -270,11 +290,6 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/issues/{pull_number}/comments",
             json={"body": body},
         )
-
-
-def get_github_client() -> Generator[GitHubClient]:
-    with GitHubClient(Settings()) as client:
-        yield client
 
 
 def verify_webhook_signature(body: bytes, signature: str | None, secret: str) -> bool:
