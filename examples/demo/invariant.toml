@@ -1,0 +1,29 @@
+version = 1
+
+[project]
+source_roots = ["src"]
+exclude_paths = ["tests/"]
+
+[[rules]]
+key = "domain-isolation"
+name = "The domain does not depend on infrastructure"
+rule_type = "forbidden_import"
+source_pattern = "shop.domain.*"
+forbidden_imports = ["shop.infrastructure"]
+
+[[rules]]
+key = "no-shell"
+name = "The domain does not run commands"
+rule_type = "forbidden_call"
+source_pattern = "shop.domain.*"
+forbidden_calls = ["os.system", "subprocess", "builtins.eval"]
+
+[[rules]]
+key = "absolute-imports"
+rule_type = "no_relative_import"
+severity = "warning"
+
+[[rules]]
+key = "small-files"
+rule_type = "max_file_lines"
+max_lines = 300

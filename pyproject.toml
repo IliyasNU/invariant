@@ -1,15 +1,16 @@
 [project]
 name = "invariant"
 version = "0.2.0"
+description = "Deterministic architecture checks for Python code"
+readme = "README.md"
 requires-python = ">=3.14"
+# The wheel holds the engine and the CLI only; they need nothing else.
 dependencies = [
-    "alembic>=1.16.5",
-    "fastapi[standard]>=0.141.1",
-    "httpx>=0.28.1",
-    "psycopg[binary]>=3.3.4",
-    "pydantic-settings>=2.15.0",
-    "sqlalchemy>=2.0.52",
+    "pydantic>=2.13",
 ]
+
+[project.scripts]
+invariant = "invariant.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]
@@ -19,11 +20,24 @@ build-backend = "hatchling.build"
 packages = ["src/invariant"]
 
 [dependency-groups]
+# The API service in app/, which runs from a checkout or the Docker image and
+# is not part of the wheel.
+server = [
+    "alembic>=1.16.5",
+    "fastapi[standard]>=0.141.1",
+    "httpx>=0.28.1",
+    "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy>=2.0.52",
+]
 dev = [
     "httpx2>=0.1.0",
     "pytest>=8.4.2",
     "ruff>=0.13.0",
 ]
+
+[tool.uv]
+default-groups = ["server", "dev"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

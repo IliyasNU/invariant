@@ -284,20 +284,24 @@ def load_config(path: Path) -> InvariantConfig:
     )
 
 
-def discover_config(directory: Path) -> Path | None:
-    """Find the configuration in ``directory``; both candidates at once is an error."""
-    config_file = directory / CONFIG_FILE
-    pyproject = directory / PYPROJECT_FILE
+def choose_config(
+    has_config_file: bool, pyproject: bytes | None, *, where: str
+) -> str | None:
+    """Which file of a directory holds the configuration, if any.
+
+    ``pyproject`` is the content of its pyproject.toml. Both candidates at
+    once is an error rather than a guess.
+    """
     in_pyproject = False
-    if pyproject.is_file():
+    if pyproject is not None:
         try:
-            tool = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool")
-        except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+            tool = tomllib.loads(pyproject.decode("utf-8")).get("tool")
+        except UnicodeDecodeError, tomllib.TOMLDecodeError:
             tool = None  # not our file to judge; it only matters if it is chosen
         in_pyproject = isinstance(tool, dict) and "invariant" in tool
-    if config_file.is_file() and in_pyproject:
+    if has_config_file and in_pyproject:
         raise ConfigError(
-            str(directory),
+            where,
             [
                 (
                     "",
@@ -308,9 +312,21 @@ def discover_config(directory: Path) -> Path | None:
                 )
             ],
         )
-    if config_file.is_file():
-        return config_file
-    return pyproject if in_pyproject else None
+    if has_config_file:
+        return CONFIG_FILE
+    return PYPROJECT_FILE if in_pyproject else None
+
+
+def discover_config(directory: Path) -> Path | None:
+    """Find the configuration in ``directory``; see :func:`choose_config`."""
+    try:
+        pyproject = (directory / PYPROJECT_FILE).read_bytes()
+    except OSError:
+        pyproject = None
+    chosen = choose_config(
+        (directory / CONFIG_FILE).is_file(), pyproject, where=str(directory)
+    )
+    return directory / chosen if chosen else None
 
 
 _COMMON_RULE_FIELDS = (

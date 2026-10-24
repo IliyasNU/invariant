@@ -4,7 +4,8 @@ Invariant is a backend developer tool for enforcing project-specific software
 architecture rules. A team records boundaries such as “domain code must not
 import infrastructure,” then submits source changes or a GitHub pull request.
 Invariant returns deterministic, machine-readable violations and keeps an audit
-history of every completed analysis.
+history of every completed analysis. The `invariant` command runs the same
+checks offline, on a developer machine or in CI.
 
 Version 0.2 is intentionally focused: it analyzes Python imports with the
 standard-library AST. It does **not** claim semantic or AI-based architecture
@@ -93,6 +94,28 @@ Example rule:
 `app/domain/payment.py` produces a structured violation with the rule, path,
 line, column, imported module, and explanation. Results are sorted by path,
 line, column and rule key, so repeated analysis is deterministic.
+
+## Command line
+
+The `invariant` command checks a project without the API, a database, a token
+or a network connection:
+
+```bash
+pip install "invariant @ git+https://github.com/IliyasNU/invariant@main"
+invariant init                                     # write a starter invariant.toml
+invariant check .                                  # every Python file in the project
+invariant check . --base origin/main --head HEAD   # only what the branch changed
+invariant check . --format json
+```
+
+It exits with `0` when no violation reaches the threshold, `1` for violations,
+and `2` for an unusable configuration, a technical error, or a check that could
+not see every file. The options, which files are read, the Git diff mode and a
+tested GitHub Actions workflow are described in [`docs/cli.md`](docs/cli.md).
+
+The installed package holds only the engine and the command, with pydantic as
+its one dependency. The service's own dependencies form the `server`
+dependency group, which `uv sync` installs by default.
 
 ## Local development
 
@@ -423,14 +446,18 @@ uv sync --dev
 uv run pytest
 INVARIANT_TEST_DATABASE_URL=postgresql+psycopg://invariant:invariant@localhost:5433/invariant_test \
   uv run pytest
-uv run ruff check app migrations src tests
-uv run ruff format --check app migrations src tests
+uv run ruff check app examples migrations src tests
+uv run ruff format --check app examples migrations src tests
 uv run python -m compileall -q app migrations src tests
+uv run invariant check .
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs ruff, applies and checks the
 migrations against PostgreSQL 18, and runs the tests on SQLite and PostgreSQL
-for every pull request and every push to `main`.
+for every pull request and every push to `main`. Its `cli` job builds the
+wheel, installs it into a clean environment and runs the command-line tests
+and the GitHub Actions example against that installation, then checks this
+repository with its own `invariant.toml`.
 
 Real local verification:
 
@@ -479,7 +506,6 @@ Potential v0.3+ work belongs here rather than in the v0.2 implementation:
 - GitHub App authentication and GitHub Checks.
 - Semantic / LLM-assisted architecture rules with human review.
 - Repository-wide dependency graphs and additional deterministic rule types.
-- CI and CLI integrations.
 - Multi-language analysis.
 - Authentication, organizations, and authorization.
 - Web UI and production deployment guidance.

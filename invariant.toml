@@ -1,0 +1,37 @@
+# Invariant checks its own engine. Only src/ is a source root: the service in
+# app/ is laid out at the repository root, and roots may not overlap.
+version = 1
+
+[project]
+source_roots = ["src"]
+
+[[rules]]
+key = "engine-is-standalone"
+name = "The engine does not depend on the service or its stack"
+rule_type = "forbidden_import"
+source_pattern = "invariant.*"
+forbidden_imports = [
+    "app",
+    "alembic",
+    "fastapi",
+    "httpx",
+    "psycopg",
+    "pydantic_settings",
+    "sqlalchemy",
+    "starlette",
+    "uvicorn",
+]
+
+[[rules]]
+key = "engine-never-runs-code"
+name = "The engine never executes or imports the code it checks"
+rule_type = "forbidden_call"
+source_pattern = "invariant.*"
+forbidden_calls = [
+    "builtins.__import__",
+    "builtins.compile",
+    "builtins.eval",
+    "builtins.exec",
+    "importlib.import_module",
+    "runpy",
+]
