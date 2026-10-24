@@ -1,10 +1,10 @@
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,7 @@ from app.analysis import rule_columns, rule_data
 from app.analysis_service import load_analysis_run, persist_analysis, result_document
 from app.config_service import SOURCE, apply_import, export_config, plan_import
 from app.database import get_db
-from app.models import AnalysisRun, Project, Rule
+from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import (
     AnalysisRequest,
     AnalysisResultDocument,
@@ -20,12 +20,16 @@ from app.schemas import (
     AnalysisRunSummaryResponse,
     ConfigImportPlan,
     ConfigImportRequest,
+    PersistedViolationResponse,
     ProjectCreate,
     ProjectResponse,
+    ProjectStatsResponse,
     ProjectUpdate,
     RuleCreate,
     RuleResponse,
     RuleUpdate,
+    RunOutcome,
+    RunStatus,
     SettingChange,
 )
 from invariant.config import RULES, ConfigError, RuleConfig, parse_config
@@ -33,6 +37,32 @@ from invariant.config import RULES, ConfigError, RuleConfig, parse_config
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_db)]
 RULE_CONFLICT = "A rule with this key or name already exists in the project"
+
+TOTAL_COUNT = "X-Total-Count"
+PAGINATED: dict[int | str, dict[str, Any]] = {
+    200: {
+        "headers": {
+            TOTAL_COUNT: {
+                "description": "How many items match the query, on all pages",
+                "schema": {"type": "integer"},
+            }
+        }
+    }
+}
+Limit = Annotated[int, Query(ge=1, le=500, description="Items per page")]
+Offset = Annotated[int, Query(ge=0, description="Items to skip")]
+Filter = Annotated[str | None, Query(min_length=1, max_length=500)]
+
+
+def _page(
+    db: Session, statement: Select, response: Response, limit: int, offset: int
+) -> list[Any]:
+    """One page of ``statement``; the X-Total-Count header counts every page."""
+    total = db.scalar(
+        select(func.count()).select_from(statement.order_by(None).subquery())
+    )
+    response.headers[TOTAL_COUNT] = str(total)
+    return list(db.scalars(statement.limit(limit).offset(offset)))
 
 
 def _project_or_404(project_id: int, db: Session) -> Project:
@@ -98,9 +128,11 @@ def create_project(payload: ProjectCreate, db: DatabaseSession) -> Project:
     return project
 
 
-@router.get("/projects", response_model=list[ProjectResponse])
-def list_projects(db: DatabaseSession) -> list[Project]:
-    return list(db.scalars(select(Project).order_by(Project.id)))
+@router.get("/projects", response_model=list[ProjectResponse], responses=PAGINATED)
+def list_projects(
+    db: DatabaseSession, response: Response, limit: Limit = 100, offset: Offset = 0
+) -> list[Project]:
+    return _page(db, select(Project).order_by(Project.id), response, limit, offset)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
@@ -160,10 +192,21 @@ def create_rule(project_id: int, payload: RuleCreate, db: DatabaseSession) -> Ru
     return rule
 
 
-@router.get("/projects/{project_id}/rules", response_model=list[RuleResponse])
-def list_rules(project_id: int, db: DatabaseSession) -> list[Rule]:
+@router.get(
+    "/projects/{project_id}/rules",
+    response_model=list[RuleResponse],
+    responses=PAGINATED,
+)
+def list_rules(
+    project_id: int,
+    db: DatabaseSession,
+    response: Response,
+    limit: Limit = 100,
+    offset: Offset = 0,
+) -> list[Rule]:
     _project_or_404(project_id, db)
-    return _project_rules(project_id, db)
+    statement = select(Rule).where(Rule.project_id == project_id).order_by(Rule.id)
+    return _page(db, statement, response, limit, offset)
 
 
 @router.get("/projects/{project_id}/rules/{rule_id}", response_model=RuleResponse)
@@ -262,27 +305,144 @@ def analyze_project(
 @router.get(
     "/projects/{project_id}/analysis-runs",
     response_model=list[AnalysisRunSummaryResponse],
+    responses=PAGINATED,
 )
 def list_analysis_runs(
     project_id: int,
     db: DatabaseSession,
+    response: Response,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Offset = 0,
+    run_status: Annotated[RunStatus | None, Query(alias="status")] = None,
+    outcome: RunOutcome | None = None,
+    source: Literal["direct", "github_pr", "github_webhook"] | None = None,
+    pull_number: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[AnalysisRun]:
+    """The project's runs, newest first, optionally filtered."""
     _project_or_404(project_id, db)
-    statement = (
-        select(AnalysisRun)
-        .where(AnalysisRun.project_id == project_id)
-        .order_by(AnalysisRun.id.desc())
-        .limit(limit)
-        .offset(offset)
+    statement = select(AnalysisRun).where(AnalysisRun.project_id == project_id)
+    for column, value in (
+        (AnalysisRun.status, run_status),
+        (AnalysisRun.outcome, outcome),
+        (AnalysisRun.source, source),
+        (AnalysisRun.pull_number, pull_number),
+    ):
+        if value is not None:
+            statement = statement.where(column == value)
+    statement = statement.order_by(AnalysisRun.id.desc())
+    return _page(db, statement, response, limit, offset)
+
+
+@router.get("/projects/{project_id}/stats", response_model=ProjectStatsResponse)
+def project_stats(project_id: int, db: DatabaseSession) -> dict[str, Any]:
+    """Counts over all of the project's runs.
+
+    The pass rate only counts runs with a verdict (pass or fail); how many runs
+    have none (incomplete, not applicable, failed or unfinished) is reported
+    next to it rather than hidden in the denominator.
+    """
+    _project_or_404(project_id, db)
+    in_project = AnalysisRun.project_id == project_id
+    by_status = dict.fromkeys(("queued", "running", "completed", "failed"), 0)
+    by_status.update(
+        db.execute(
+            select(AnalysisRun.status, func.count())
+            .where(in_project)
+            .group_by(AnalysisRun.status)
+        )
+        .tuples()
+        .all()
     )
-    return list(db.scalars(statement))
+    by_outcome = dict.fromkeys(("pass", "fail", "incomplete", "not_applicable"), 0)
+    by_outcome.update(
+        db.execute(
+            select(AnalysisRun.outcome, func.count())
+            .where(in_project, AnalysisRun.outcome.is_not(None))
+            .group_by(AnalysisRun.outcome)
+        )
+        .tuples()
+        .all()
+    )
+    totals = db.execute(
+        select(
+            func.coalesce(func.sum(AnalysisRun.error_count), 0),
+            func.coalesce(func.sum(AnalysisRun.warning_count), 0),
+            func.coalesce(func.sum(AnalysisRun.analysis_error_count), 0),
+            func.count(AnalysisRun.duration_ms),
+            func.avg(AnalysisRun.duration_ms),
+            func.max(AnalysisRun.duration_ms),
+        ).where(in_project)
+    ).one()
+    errors, warnings, analysis_errors, timed, average, longest = totals
+    runs = sum(by_status.values())
+    decided = by_outcome["pass"] + by_outcome["fail"]
+    latest = db.scalars(
+        select(AnalysisRun).where(in_project).order_by(AnalysisRun.id.desc()).limit(10)
+    )
+    return {
+        "project_id": project_id,
+        "runs": runs,
+        "by_status": by_status,
+        "by_outcome": by_outcome,
+        "pass_rate": {
+            "passed": by_outcome["pass"],
+            "decided": decided,
+            "without_verdict": runs - decided,
+            "rate": by_outcome["pass"] / decided if decided else None,
+        },
+        "diagnostics": {
+            "errors": errors,
+            "warnings": warnings,
+            "analysis_errors": analysis_errors,
+        },
+        "duration": {
+            "runs": timed,
+            "average_ms": float(average) if average is not None else None,
+            "max_ms": longest,
+        },
+        "latest": list(latest),
+    }
 
 
 @router.get("/analysis-runs/{analysis_run_id}", response_model=AnalysisRunResponse)
 def get_analysis_run(analysis_run_id: int, db: DatabaseSession) -> AnalysisRun:
     return _run_or_404(analysis_run_id, db)
+
+
+@router.get(
+    "/analysis-runs/{analysis_run_id}/diagnostics",
+    response_model=list[PersistedViolationResponse],
+    responses=PAGINATED,
+)
+def list_diagnostics(
+    analysis_run_id: int,
+    db: DatabaseSession,
+    response: Response,
+    limit: Limit = 100,
+    offset: Offset = 0,
+    kind: Literal["violation", "error"] | None = None,
+    severity: Literal["error", "warning"] | None = None,
+    code: Filter = None,
+    rule_key: Filter = None,
+    path: Filter = None,
+) -> list[AnalysisViolation]:
+    """A run's diagnostics in the engine's order: path, line, column, rule key."""
+    if db.get(AnalysisRun, analysis_run_id) is None:
+        raise HTTPException(status_code=404, detail="Analysis run not found")
+    statement = select(AnalysisViolation).where(
+        AnalysisViolation.analysis_run_id == analysis_run_id
+    )
+    for column, value in (
+        (AnalysisViolation.kind, kind),
+        (AnalysisViolation.severity, severity),
+        (AnalysisViolation.code, code),
+        (AnalysisViolation.rule_key, rule_key),
+        (AnalysisViolation.path, path),
+    ):
+        if value is not None:
+            statement = statement.where(column == value)
+    statement = statement.order_by(AnalysisViolation.id)
+    return _page(db, statement, response, limit, offset)
 
 
 @router.get(
