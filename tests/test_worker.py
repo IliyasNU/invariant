@@ -297,3 +297,48 @@ def test_concurrent_identical_deliveries_queue_one_job():
         thread.join()
 
     assert sorted(outcomes) == ["duplicate"] * 4 + ["queued"]
+
+
+def delete_project(project_id: int) -> None:
+    with SessionLocal() as other:
+        if project := other.get(Project, project_id):
+            other.delete(project)
+            other.commit()
+
+
+class DeletingGitHub(FakeGitHub):
+    """Deletes the run's project when the worker opens it or fetches the PR."""
+
+    def __init__(self, when: str, *errors: Exception) -> None:
+        super().__init__(*errors)
+        self.when = when
+
+    def __enter__(self) -> Self:
+        if self.when == "before":
+            delete_project(1)
+        return self
+
+    def get_pull_request(self, owner, repo, pull_number) -> PullRequestMetadata:
+        if self.when == "during" and self.calls == 0:
+            delete_project(1)
+        return super().get_pull_request(owner, repo, pull_number)
+
+
+@pytest.mark.parametrize(
+    ("when", "errors"),
+    [("before", ()), ("during", ()), ("during", (RATE_LIMITED,))],
+    ids=["before-the-analysis", "during-the-analysis", "during-a-retry"],
+)
+def test_a_run_deleted_with_its_project_does_not_stop_the_worker(when, errors):
+    [deleted] = queue_runs()
+    with SessionLocal() as db:
+        other = Project(name="Other", github_owner="o2", github_repo="r2")
+        db.add(other)
+        db.commit()
+        kept = enqueue_github_analysis(db, other, 8, source="github_pr").id
+
+    github = DeletingGitHub(when, *errors)
+    assert work(github) == 2
+
+    assert load(deleted) is None
+    assert (load(kept).status, load(kept).outcome) == ("completed", "not_applicable")

@@ -459,3 +459,40 @@ def test_long_paths_and_messages_are_shortened():
     assert len(path) == len(":1") + MAX_TEXT
     assert path.endswith("…:1")
     assert len(message.removesuffix("`")) == MAX_TEXT
+
+
+class DeletingGitHub(CommentingGitHub):
+    """Deletes the project while its run's comment is being published."""
+
+    def __init__(self, project_id: int, *errors: GitHubAPIError) -> None:
+        super().__init__(HEAD_A)
+        self.project_id = project_id
+        self.errors = list(errors)
+
+    def get_pull_request(self, owner, repo, pull_number) -> PullRequestMetadata:
+        with SessionLocal() as other:
+            other.delete(other.get(Project, self.project_id))
+            other.commit()
+        return super().get_pull_request(owner, repo, pull_number)
+
+
+@pytest.mark.parametrize(
+    "errors",
+    [(), (GitHubAPIError(429, "github_rate_limited", "Rate limited", True),)],
+    ids=["while-publishing", "while-retrying"],
+)
+def test_a_run_deleted_while_its_comment_is_published_does_not_stop_the_worker(
+    errors,
+):
+    project_id = project_with_rule()
+    run_id = queue(project_id)
+    # The run completes, but its comment is left for the queue of comments.
+    work(CommentingGitHub(HEAD_A), max_attempts=1)
+    with SessionLocal() as db:
+        done = db.get(AnalysisRun, run_id)
+        done.feedback_status, done.feedback_next_attempt_at = "pending", None
+        db.commit()
+
+    assert work(DeletingGitHub(project_id, *errors)) == 0
+
+    assert run(run_id) is None

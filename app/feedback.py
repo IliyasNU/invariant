@@ -170,6 +170,21 @@ def claim_feedback(
     return run
 
 
+def _deleted(db: Session, run_id: int) -> bool:
+    """Whether the run is gone with its project; if not, it stays locked."""
+    exists = db.scalar(
+        select(AnalysisRun.id).where(AnalysisRun.id == run_id).with_for_update()
+    )
+    if exists is None:
+        db.rollback()
+        logger.info(
+            "Run %s was deleted with its project; its comment is dropped",
+            run_id,
+            extra={"event": "feedback_dropped"},
+        )
+    return exists is None
+
+
 def hold(run: AnalysisRun, hold_seconds: float, now: datetime) -> None:
     run.feedback_attempts += 1
     run.feedback_next_attempt_at = now + timedelta(seconds=hold_seconds)
@@ -192,6 +207,9 @@ def publish_feedback(
     """
     owner, repo = run.repository_owner, run.repository_name
     assert owner and repo and run.pull_number is not None
+    # The run may be deleted with its project meanwhile; after a rollback its
+    # ID is then all that is left of it.
+    run_id = run.id
     try:
         head = github.get_pull_request(owner, repo, run.pull_number).head_sha
         record = _comment_record(db, run)
@@ -233,6 +251,8 @@ def publish_feedback(
         )
     except GitHubAPIError as exc:
         db.rollback()
+        if _deleted(db, run_id):
+            return
         run.feedback_error = exc.code
         if exc.transient and run.feedback_attempts < max_attempts:
             delay = retry_delay(run.feedback_attempts, exc.retry_after)
@@ -260,6 +280,8 @@ def publish_feedback(
         db.commit()
     except Exception:
         db.rollback()
+        if _deleted(db, run_id):
+            return
         logger.exception(
             "The comment for run %s failed unexpectedly",
             run.id,

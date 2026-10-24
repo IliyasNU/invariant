@@ -151,14 +151,15 @@ def claim(
     return run
 
 
-def _still_ours(db: Session, run: AnalysisRun, worker_id: str) -> bool:
+def _still_ours(db: Session, run_id: int, worker_id: str) -> bool:
     # Locks the row until the commit, so the lease cannot change in between.
+    # A run deleted with its project is no longer anyone's.
     holder = db.execute(
         select(AnalysisRun.status, AnalysisRun.locked_by)
-        .where(AnalysisRun.id == run.id)
+        .where(AnalysisRun.id == run_id)
         .with_for_update()
-    ).one()
-    return tuple(holder) == ("running", worker_id)
+    ).one_or_none()
+    return holder is not None and tuple(holder) == ("running", worker_id)
 
 
 def process(
@@ -169,6 +170,9 @@ def process(
     worker_id: str,
 ) -> None:
     """Execute a claimed run and record how it ended."""
+    # The run may be deleted with its project while it runs; after a rollback
+    # its ID is then all that is left to log.
+    run_id = run.id
     # A rollback forgets what the attempt changed, its start time included.
     started_at = _now()
     began = time.monotonic()
@@ -182,11 +186,11 @@ def process(
     try:
         with github_factory() as github:
             execute_github_analysis(db, run, github, deadline=deadline)
-            if not _still_ours(db, run, worker_id):
+            if not _still_ours(db, run_id, worker_id):
                 db.rollback()
                 logger.warning(
-                    "Run %s was taken over; its result is dropped",
-                    run.id,
+                    "Run %s was taken over or deleted; its result is dropped",
+                    run_id,
                     extra={"event": "run_result_dropped"},
                 )
                 return
@@ -212,7 +216,7 @@ def process(
                 _publish(db, run, github, policy)
     except GitHubAPIError as exc:
         db.rollback()
-        if not _still_ours(db, run, worker_id):
+        if not _still_ours(db, run_id, worker_id):
             db.rollback()
             return
         run.started_at = started_at
@@ -246,10 +250,10 @@ def process(
         db.rollback()
         logger.exception(
             "Run %s failed unexpectedly",
-            run.id,
+            run_id,
             extra={"event": "run_failed", "error_code": "internal_error"},
         )
-        if _still_ours(db, run, worker_id):
+        if _still_ours(db, run_id, worker_id):
             run.started_at = started_at
             fail_run(run, "internal_error", "The analysis failed unexpectedly")
             db.commit()
