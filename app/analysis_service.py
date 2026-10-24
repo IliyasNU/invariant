@@ -87,10 +87,9 @@ def _complete(
     run.rules_total = result.rules_total
     run.rules_evaluated = result.rules_enabled
     run.evaluations = result.evaluations
-    violations = result.violations
-    run.violation_count = len(violations)
-    run.error_count = sum(item.severity == "error" for item in violations)
-    run.warning_count = sum(item.severity == "warning" for item in violations)
+    # Counted in full; only the first MAX_LISTED_VIOLATIONS are stored.
+    run.error_count, run.warning_count = result.error_count, result.warning_count
+    run.violation_count = run.error_count + run.warning_count
     run.analysis_error_count = len(result.errors)
     rule_ids = {rule.key: rule.id for rule in rules}
     run.violations = [
