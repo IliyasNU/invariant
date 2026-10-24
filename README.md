@@ -741,6 +741,7 @@ scope for v1.0.
 | A direct analysis | 500 files, each at most 1 MB | `422 validation_error` |
 | Rules | 500 per project, as in one configuration file | `409 too_many_rules` |
 | Modules or calls in one rule | 100 | `422 validation_error` |
+| Violations listed in a run | 1,000, the first found | counted in the run's summary, `violation_count` and PR comment, but not stored or listed; the outcome is the same |
 | Python nested too deeply to parse | the parser's own limit | an `error` diagnostic (`too_complex`); the run is `incomplete` |
 | Analyses and configuration imports | `INVARIANT_RATE_LIMIT_PER_MINUTE`, 60 per client | `429 too_many_requests`, with `Retry-After` |
 | Requests without a valid key | `INVARIANT_AUTH_FAILURES_PER_MINUTE`, 30 per client | `429 too_many_failed_keys`; the right key is never slowed down |
@@ -757,6 +758,11 @@ against one rule of each type, took 10 seconds and grew the API process by
 16. `scripts/measure_limits.py` repeats the measurement against a migrated
 database. With two analyses at once, plan for twice that above the API's
 resting memory.
+
+A request made to find as many violations as it can, 14.5 MiB of `import
+os` lines against a rule forbidding `os`, finds 1.4 million; with only the
+first 1,000 stored it took 14 seconds and peaked at 445 MiB on the same
+machine.
 
 ## Health checks
 
