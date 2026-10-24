@@ -469,6 +469,8 @@ def test_webhook_signature_validation():
     assert not verify_webhook_signature(body + b" ", signature, WEBHOOK_SECRET)
     assert not verify_webhook_signature(body, "sha1=bad", WEBHOOK_SECRET)
     assert not verify_webhook_signature(body, None, WEBHOOK_SECRET)
+    # A header can carry any byte; Starlette decodes it as Latin-1.
+    assert not verify_webhook_signature(body, "sha256=\xe9\xe9", WEBHOOK_SECRET)
 
 
 def test_webhook_rejects_invalid_signature(client, github, monkeypatch):
@@ -485,6 +487,29 @@ def test_webhook_rejects_invalid_signature(client, github, monkeypatch):
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_github_signature"
+
+
+def test_a_signature_that_is_not_ascii_is_refused_not_a_server_error(
+    client, github, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    project = create_github_project(client)
+    body = json.dumps(pull_request_payload()).encode()
+
+    response = client.post(
+        "/integrations/github/webhook",
+        content=body,
+        headers={
+            **signed_headers(body),
+            # Anyone can send this: the webhook needs no API key.
+            "X-Hub-Signature-256": b"sha256=" + bytes(range(0x80, 0xC0)),
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_github_signature"
+    assert github.pull_calls == 0
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
 
 
 def test_webhook_requires_configured_secret(client, github, monkeypatch):
