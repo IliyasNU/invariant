@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 
 import app.api
@@ -176,19 +176,30 @@ def test_a_project_has_at_most_as_many_rules_as_a_file(client, monkeypatch):
 
 
 def test_readiness_needs_the_database_and_this_versions_schema(client, monkeypatch):
-    # The test database is made by create_all, not by the migrations.
+    # The test database is made by create_all, not by the migrations; CI's
+    # migration step leaves an empty alembic_version table behind.
     unmigrated = client.get("/ready")
     with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE alembic_version (version_num VARCHAR(32))")
-        )
+        existed = inspect(connection).has_table("alembic_version")
+        if not existed:
+            connection.execute(
+                text("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+            )
+        connection.execute(text("DELETE FROM alembic_version"))
         connection.execute(
             text("INSERT INTO alembic_version VALUES (:head)"),
             {"head": migration_head()},
         )
     migrated = client.get("/ready")
     with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
+        # As it was found.
+        connection.execute(
+            text(
+                "DELETE FROM alembic_version"
+                if existed
+                else "DROP TABLE alembic_version"
+            )
+        )
 
     def down(*_args, **_kwargs):
         raise OperationalError("connect", {}, Exception("password=hunter2 refused"))
