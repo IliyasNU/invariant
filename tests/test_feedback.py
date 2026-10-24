@@ -1,15 +1,24 @@
+import os
+import re
+import threading
+import time
 from datetime import UTC, datetime
 from typing import Self
+
+import pytest
 
 import app.feedback
 from app.analysis_service import enqueue_github_analysis
 from app.database import SessionLocal
-from app.feedback import MAX_TEXT, feedback_body
+from app.feedback import MAX_TEXT, feedback_body, publish_feedback
 from app.github import ChangedPythonFiles, GitHubAPIError, PullRequestMetadata
 from app.models import AnalysisRun, AnalysisViolation, Project, PullRequestComment, Rule
 from app.schemas import SourceFile
 from app.worker import Policy, run_worker
 
+ON_POSTGRESQL = os.environ.get("INVARIANT_TEST_DATABASE_URL", "").startswith(
+    "postgresql"
+)
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
 VIOLATION = "import app.infrastructure\n"
@@ -274,6 +283,63 @@ def test_an_unexpected_publishing_error_does_not_stop_the_worker(monkeypatch):
     make_feedback_due(run_id)
     assert work(CommentingGitHub(HEAD_A)) == 0
     assert run(run_id).feedback_status == "failed"
+
+
+class RacingGitHub(CommentingGitHub):
+    """Edits the comment more slowly the older the run it shows.
+
+    Unless publishers take turns, the last edit to land is the oldest run's.
+    """
+
+    def __init__(self, newest: int) -> None:
+        super().__init__(HEAD_A)
+        self.newest = newest
+
+    def update_comment(self, owner, repo, comment_id, body) -> bool:
+        shown = int(re.search(r"run (\d+)", body).group(1))
+        time.sleep(0.1 * (self.newest - shown))
+        return super().update_comment(owner, repo, comment_id, body)
+
+
+@pytest.mark.skipif(not ON_POSTGRESQL, reason="row locks need PostgreSQL")
+def test_concurrent_publishers_leave_the_newest_run_on_the_comment():
+    project_id = project_with_rule()
+    run_ids = [queue(project_id) for _ in range(4)]
+    quiet = CommentingGitHub(HEAD_A)
+    quiet.comment_enabled = False
+    work(quiet)
+    with SessionLocal() as db:
+        db.add(PullRequestComment(project_id=project_id, pull_number=7, comment_id=101))
+        for run_id in run_ids:
+            db.get(AnalysisRun, run_id).feedback_status = "pending"
+        db.commit()
+    github = RacingGitHub(newest=max(run_ids))
+    github.comments[101] = "an earlier comment"
+    barrier = threading.Barrier(len(run_ids))
+
+    def publish(run_id: int) -> None:
+        with SessionLocal() as db:
+            pending = db.get(AnalysisRun, run_id)
+            barrier.wait()
+            publish_feedback(
+                db,
+                pending,
+                github,
+                public_url=None,
+                max_attempts=3,
+                retry_delay=Policy().retry_delay,
+            )
+
+    threads = [threading.Thread(target=publish, args=(i,)) for i in run_ids]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert f"run {max(run_ids)} " in github.comments[101]
+    assert (github.created, record(project_id).analysis_run_id) == (0, max(run_ids))
+    assert run(max(run_ids)).feedback_status == "posted"
+    assert {run(i).feedback_status for i in run_ids} <= {"posted", "stale"}
 
 
 def test_nothing_is_written_without_comments_enabled(client):
