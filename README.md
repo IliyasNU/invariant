@@ -133,6 +133,7 @@ uv sync --dev
 docker compose up -d db
 uv run alembic upgrade head
 uv run fastapi dev app/main.py
+uv run python -m app.worker        # in another terminal, for GitHub analyses
 ```
 
 The API is available at <http://127.0.0.1:8000>, with interactive documentation
@@ -163,16 +164,20 @@ and local-only example credentials.
 
 ## Docker full stack
 
-Build the application image, start PostgreSQL, migrate, and run FastAPI:
+Build the application image, start PostgreSQL, migrate, and run the API and
+the worker:
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-The app container waits for a healthy database, runs `alembic upgrade head`,
-and connects to PostgreSQL through Compose service DNS at `db:5432`. The image
-runs as an unprivileged `invariant` user.
+The `migrate` service waits for a healthy database and runs
+`alembic upgrade head` once; the `app` (FastAPI) and `worker` services start
+only after it succeeded. All of them use one image, run as an unprivileged
+`invariant` user, and reach PostgreSQL through Compose service DNS at
+`db:5432`. On `docker compose stop` the worker finishes the analysis it is
+running (within two minutes) before it exits.
 
 Both published ports bind to `127.0.0.1` only, because the API has no
 authentication and the database uses local example credentials. Put a reverse
@@ -182,7 +187,7 @@ Useful commands:
 
 ```bash
 docker compose ps
-docker compose logs app db
+docker compose logs app worker db
 docker compose down
 ```
 
@@ -369,7 +374,7 @@ completed run found:
 | `completed` | `incomplete` | `null` | A file could not be analyzed, so there is no verdict |
 | `completed` | `not_applicable` | `null` | Nothing was checked: no eligible file, or no enabled rule applies |
 | `failed` | `null` | `null` | The analysis could not run; `error` has a safe `code` and `message` |
-| `queued`, `running` | `null` | `null` | Reserved for background analysis |
+| `queued`, `running` | `null` | `null` | A GitHub analysis waiting for, or being run by, the [worker](#worker) |
 
 The database enforces these combinations. Warnings never fail the default
 `fail_on = "error"`. `files`, `rules` and `summary` count what was checked
@@ -396,26 +401,30 @@ curl -X POST http://127.0.0.1:8000/projects/1/analyze/github \
   -d '{"pull_number":12}'
 ```
 
-Invariant fetches PR metadata and the changed-file list through GitHub's REST
-API, downloads each changed Python file at the PR head SHA, runs the shared AST
-analyzer, persists the result, and returns the full run. Removed and non-Python
-files are outside the analysis.
+The request returns `202` with the run, status `queued`: the
+[worker](#worker) does the analysis. Poll `GET /analysis-runs/{id}` until the
+status is `completed` or `failed`. Each request queues a new run, so the same
+commit can be analyzed again. The worker fetches the pull request's metadata
+and changed files through GitHub's REST API, downloads each changed Python file
+at the head SHA, runs the shared AST analyzer and records the result. Removed
+and non-Python files are outside the analysis.
 
-Every analysis is recorded and returned as a run. If a changed `.py` file is
-over 1 MB (`too_large`), not UTF-8 (`undecodable`) or has a path the API
-rejects (`invalid_path`), or GitHub listed fewer files than the pull request
-changes (`file_list_truncated`), the run is `incomplete` and lists each of
-these as an `error` diagnostic. A pull request that changes no Python file, or
-none that an enabled rule applies to, is `not_applicable`. Neither posts a PR
-comment.
+If a changed `.py` file is over 1 MB (`too_large`), not UTF-8 (`undecodable`)
+or has a path the API rejects (`invalid_path`), or GitHub listed fewer files
+than the pull request changes (`file_list_truncated`), the run is `incomplete`
+and lists each of these as an `error` diagnostic. A pull request that changes
+no Python file, or none that an enabled rule applies to, is `not_applicable`.
+Neither posts a PR comment.
 
-When GitHub cannot be used (404, rate limit, authorization failure, malformed
-response, network failure), the run is recorded as `failed` with the error's
-code, and the request returns the matching status with the run's ID, never
-credentials or upstream payloads:
+When GitHub cannot be used, the worker retries what may pass (network
+failures, rate limits, GitHub server errors) and fails the run on anything
+else (404, authorization failures, malformed responses). A failed run records
+the error's code and Invariant's own message, never credentials or upstream
+payloads:
 
 ```json
-{"detail": {"code": "github_rate_limited", "message": "GitHub API rate limit exceeded", "analysis_run_id": 43}}
+{"status": "failed", "outcome": null, "passed": null, "attempts": 3,
+ "error": {"code": "github_rate_limited", "message": "GitHub API rate limit exceeded"}}
 ```
 
 ### Analysis history
@@ -486,20 +495,46 @@ comparison before parsing or acting on the payload. It analyzes pull request
 actions `opened`, `synchronize`, and `reopened`; other events/actions return a
 clean `202 ignored` response.
 
-An analyzed delivery returns `200` with `{"status": "analyzed",
-"analysis_run_id": ..., "outcome": ...}`, including for incomplete and
-not-applicable results. A GitHub failure records a failed run and returns the
-same error as the manual endpoint. The payload fields Invariant uses are
+A pull request event is queued for the worker and returns `202` with
+`{"status": "queued", "analysis_run_id": ...}` only once the queued run is
+committed, so a restart of the API after the reply loses nothing. The payload
+fields Invariant uses are
 type-checked before use: a signed request with, for example, `"action": []`
 or a string pull request number gets `400 invalid_webhook_payload`; an
 unsigned request still gets `401`.
 
 For relevant events, repository owner/name selects the configured project. The
-`X-GitHub-Delivery` value is persisted with a unique constraint, so retrying the
-same delivery returns the existing run (`"status": "duplicate"`) instead of
-creating a duplicate, even when that run failed; analyze the pull request
-again with the manual endpoint. Manual and webhook-triggered PR analyses use
-the same code path.
+`X-GitHub-Delivery` value is persisted with a unique constraint, so a repeated
+delivery, even one arriving at the same moment, returns `200` with the
+existing run (`"status": "duplicate"`, with its `outcome` once it has one)
+instead of queuing another. To analyze the same commit again, use the manual
+endpoint. Manual and webhook-triggered PR analyses share the queue and the
+worker.
+
+## Worker
+
+The worker runs the queued GitHub analyses:
+
+```bash
+uv run python -m app.worker
+```
+
+Several workers may run at once. Each claims the oldest queued run that is
+due, locking it so no other worker takes it (`FOR UPDATE SKIP LOCKED`), and
+holds it under a lease. A run whose worker died is queued again when its
+lease expires, or failed (`worker_lost`) after its last attempt; a worker
+records a result only while it still holds the run. Transient GitHub errors
+queue the run again with exponential backoff, never sooner than GitHub's
+`Retry-After` or rate-limit reset; the run keeps the last error until an
+attempt succeeds. `SIGTERM` or `SIGINT` stops the worker after the run in
+progress.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WORKER_MAX_ATTEMPTS` | `3` | Attempts per run, the first included |
+| `WORKER_LEASE_SECONDS` | `600` | How long a worker holds a run before another may take it over |
+| `WORKER_RETRY_SECONDS` | `30` | The first retry's delay; each next one doubles it, up to an hour |
+| `WORKER_POLL_SECONDS` | `2` | How often an idle worker looks for work |
 
 ### Optional PR feedback
 
@@ -563,9 +598,9 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 - History keeps results, diagnostics, counts, configuration snapshots and
   commit IDs, but never source code. There is no retention policy yet: runs
   are kept until their project is deleted.
-- A failed webhook analysis is not retried, and redelivering the same
-  delivery returns the failed run; the background worker planned for v1.0
-  retries.
+- A worker's lease must outlast an analysis: a run that takes longer than
+  `WORKER_LEASE_SECONDS` is taken over and analyzed again, and only the last
+  holder's result is recorded.
 - Columns count Unicode characters, 1-based. Runs stored before this change
   recorded UTF-8 byte offsets, which differ only after non-ASCII text on the
   same line.
