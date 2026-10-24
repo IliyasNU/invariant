@@ -1,14 +1,14 @@
 # Configuration and rules
 
 Invariant checks Python code against architecture rules with one engine, the
-`invariant` package in `src/invariant`. The API and the GitHub integration
-already run on it, and the upcoming `invariant check` command reads the file
-format described here. One schema validates the file, API payloads and stored
-rules, so a rule means the same thing everywhere.
+`invariant` package in `src/invariant`. The API, the GitHub integration and
+the `invariant` command ([cli.md](cli.md)) all run on it. One schema validates
+the file, API payloads and stored rules, so a rule means the same thing
+everywhere.
 
-The API stores the same settings and rules, and can export a project as this
-file or import one (see the README). The `invariant check` command that reads
-it locally comes with the CLI.
+`invariant check` reads this file locally. The API stores the same settings
+and rules, and can export a project as this file or import one (see the
+README).
 
 ## The configuration file
 
@@ -125,9 +125,10 @@ Roots must not overlap (`["src", "src/app"]` or `[".", "src"]` is an error), so
 every file belongs to at most one root. Python files outside all roots are not
 checked and are counted as excluded.
 
-Paths are repository-relative. Backslashes count as separators, `./` and
-duplicate slashes are removed, and absolute paths, drive letters, `..` and
-control characters are rejected.
+Paths are repository-relative; for `invariant check`, the repository is the
+directory it checks. Backslashes count as separators, `./` and duplicate
+slashes are removed, and absolute paths, drive letters, `..` and control
+characters are rejected.
 
 ## Two kinds of pattern
 
