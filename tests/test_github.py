@@ -7,7 +7,6 @@ import pytest
 
 from app.config import Settings
 from app.github import (
-    MAX_GITHUB_FILE_BYTES,
     ChangedPythonFiles,
     GitHubAPIError,
     GitHubClient,
@@ -18,6 +17,7 @@ from app.github import (
 )
 from app.main import app
 from app.schemas import SourceFile
+from invariant.files import MAX_FILE_BYTES
 
 WEBHOOK_SECRET = "unit-test-webhook-secret"
 
@@ -529,7 +529,7 @@ def test_github_client_fetches_only_live_python_files():
 def test_github_client_reports_files_it_could_not_analyze():
     downloaded: list[str] = []
     contents = {
-        "app/big.py": b"import app.infrastructure\n" + b"#" * MAX_GITHUB_FILE_BYTES,
+        "app/big.py": b"import app.infrastructure\n" + b"#" * MAX_FILE_BYTES,
         "app/latin.py": b"\xff\xfeimport app.infrastructure\n",
         "app/ok.py": b"import json\n",
     }

@@ -21,12 +21,15 @@ from invariant.paths import (
 from invariant.result import AnalysisResult, Diagnostic, FileCounts, Outcome
 from invariant.rules import CHECKERS, ParsedFile, rule_applies
 
-UnreadableReason = Literal["too_large", "undecodable", "invalid_path", "unreadable"]
+UnreadableReason = Literal[
+    "too_large", "undecodable", "invalid_path", "symlink", "unreadable"
+]
 
 _UNREADABLE_MESSAGES: dict[str, str] = {
     "too_large": "The file is larger than the analysis size limit",
     "undecodable": "The file is not valid UTF-8",
     "invalid_path": "The path cannot name a file in the repository",
+    "symlink": "The file is a symbolic link, which is not followed",
     "unreadable": "The file could not be read",
 }
 
@@ -125,7 +128,10 @@ def analyze(
         message = _UNREADABLE_MESSAGES[item.reason]
         if item.detail:
             message = f"{message}: {item.detail}"
-        diagnostics.append(_error(item.reason, message, path or item.path))
+        # An invalid name is shown as given: normalized, "a\\b.py" would read
+        # as a different file, a/b.py.
+        shown = item.path if item.reason == "invalid_path" else path or item.path
+        diagnostics.append(_error(item.reason, message, shown))
 
     seen: set[str] = set()
     for source in sources:

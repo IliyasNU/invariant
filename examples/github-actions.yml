@@ -1,0 +1,36 @@
+# Check a Python project's architecture with Invariant on every pull request
+# and push. Copy this file to .github/workflows/invariant.yml in the project
+# and add an invariant.toml (`invariant init` writes a starter). No secrets or
+# tokens are needed: the check runs offline on the checked-out code.
+name: Architecture
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  invariant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The diff mode needs the pull request's base commit.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      # Pin a release tag or commit instead of main for reproducible checks.
+      - run: pip install "invariant @ git+https://github.com/IliyasNU/invariant@main"
+      - name: Check the files the pull request changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: invariant check . --base "$BASE" --head "$HEAD"
+      - name: Check the whole project
+        if: github.event_name != 'pull_request'
+        run: invariant check .

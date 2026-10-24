@@ -10,8 +10,8 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.schemas import SourceFile
+from invariant.files import MAX_FILE_BYTES, decode_source
 
-MAX_GITHUB_FILE_BYTES = 1_000_000
 MAX_FILE_PAGES = 30
 FILES_PER_PAGE = 100
 
@@ -238,11 +238,11 @@ class GitHubClient:
                 # The result is incomplete anyway; spare the downloads.
                 continue
             content = self.get_file_bytes(owner, repo, path, pull_request.head_sha)
-            if len(content) > MAX_GITHUB_FILE_BYTES:
+            if len(content) > MAX_FILE_BYTES:
                 skipped.append(SkippedFile(path, "too_large"))
                 continue
             try:
-                text = content.decode("utf-8-sig")
+                text = decode_source(content)
             except UnicodeDecodeError:
                 skipped.append(SkippedFile(path, "undecodable"))
                 continue
