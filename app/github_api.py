@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.analysis_service import AnalysisNotApplicable, analyze_github_pull_request
+from app.analysis_service import analyze_github_pull_request
 from app.config import Settings
 from app.database import get_db
 from app.github import GitHubClient, get_github_client, verify_webhook_signature
@@ -58,11 +58,7 @@ def analyze_github_project(
     )
 
 
-@router.post(
-    "/integrations/github/webhook",
-    response_model=WebhookResponse,
-    responses={202: {"model": WebhookResponse}},
-)
+@router.post("/integrations/github/webhook", response_model=WebhookResponse)
 def github_webhook(
     body: RawBody,
     db: DatabaseSession,
@@ -144,7 +140,7 @@ def github_webhook(
         select(AnalysisRun).where(AnalysisRun.github_delivery_id == github_delivery)
     )
     if existing is not None:
-        return WebhookResponse(status="duplicate", analysis_run_id=existing.id)
+        return _duplicate(existing)
 
     try:
         event = PullRequestEvent.model_validate(payload)
@@ -184,19 +180,22 @@ def github_webhook(
             source="github_webhook",
             github_delivery_id=github_delivery,
         )
-    except AnalysisNotApplicable as exc:
-        # A docs-only pull request is a normal event, not a failed delivery.
-        response = WebhookResponse(status="not_applicable", detail=exc.message)
-        return JSONResponse(
-            status_code=status.HTTP_202_ACCEPTED, content=response.model_dump()
-        )
     except IntegrityError:
         db.rollback()
         existing = db.scalar(
             select(AnalysisRun).where(AnalysisRun.github_delivery_id == github_delivery)
         )
         if existing is not None:
-            return WebhookResponse(status="duplicate", analysis_run_id=existing.id)
+            return _duplicate(existing)
         raise
 
-    return WebhookResponse(status="analyzed", analysis_run_id=run.id)
+    return WebhookResponse(
+        status="analyzed", analysis_run_id=run.id, outcome=run.outcome
+    )
+
+
+def _duplicate(run: AnalysisRun) -> WebhookResponse:
+    # A repeated delivery gets the run its first delivery recorded.
+    return WebhookResponse(
+        status="duplicate", analysis_run_id=run.id, outcome=run.outcome
+    )

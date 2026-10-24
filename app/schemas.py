@@ -268,17 +268,72 @@ class ViolationResponse(APIModel):
     message: str
 
 
+RunStatus = Literal["queued", "running", "completed", "failed"]
+RunOutcome = Literal["pass", "fail", "incomplete", "not_applicable"]
+
+
+class FileCountsResponse(APIModel):
+    """``total = eligible + excluded + ignored``, ``eligible = analyzed + skipped``.
+
+    Null where a run recorded before v0.3, or a failed run, has no count.
+    """
+
+    total: int | None
+    eligible: int | None
+    analyzed: int
+    excluded: int | None
+    skipped: int | None
+    ignored: int | None
+
+
+class RuleCountsResponse(APIModel):
+    total: int | None
+    enabled: int
+    # Pairs of (analyzed file, enabled rule that applies to it).
+    evaluations: int | None
+
+
+class DiagnosticCountsResponse(APIModel):
+    # Violations by severity, and files that could not be analyzed.
+    errors: int
+    warnings: int
+    analysis_errors: int
+
+
+class RunErrorResponse(APIModel):
+    code: str
+    message: str | None
+
+
 class AnalysisRunSummaryResponse(APIModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     project_id: int
     source: str
-    status: str
-    passed: bool
+    # Whether the analysis ran: queued, running, completed or failed.
+    status: RunStatus
+    # What a completed run found; null for any other status.
+    outcome: RunOutcome | None
+    # True only for pass, false only for fail, otherwise null.
+    passed: bool | None
+    fail_on: str | None
     pull_number: int | None
     repository_owner: str | None
     repository_name: str | None
+    base_sha: str | None
+    head_sha: str | None
+    files: FileCountsResponse = Field(validation_alias="file_counts")
+    rules: RuleCountsResponse = Field(validation_alias="rule_counts")
+    summary: DiagnosticCountsResponse = Field(validation_alias="diagnostic_counts")
+    # Why a failed run did not complete.
+    error: RunErrorResponse | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: int | None
+    engine_version: str | None
+    config_hash: str | None
+    # The v0.2 fields: files.analyzed, rules.enabled and the number of violations.
     files_analyzed: int
     rules_evaluated: int
     violation_count: int
@@ -309,7 +364,63 @@ class PersistedViolationResponse(APIModel):
 
 
 class AnalysisRunResponse(AnalysisRunSummaryResponse):
+    # The project settings and rules that were checked.
+    config: dict[str, Any] | None = Field(validation_alias="config_snapshot")
+    # Every diagnostic: violations, and errors for files that were not analyzed.
     violations: list[PersistedViolationResponse]
+
+
+class DiagnosticResponse(APIModel):
+    kind: Literal["violation", "error"]
+    code: str
+    severity: str
+    message: str
+    path: str | None
+    line: int | None
+    column: int | None
+    rule_key: str | None
+    rule_name: str | None
+    data: dict[str, Any]
+
+
+class ResultSourceResponse(APIModel):
+    kind: str
+    repository_owner: str | None
+    repository_name: str | None
+    pull_number: int | None
+    base_sha: str | None
+    head_sha: str | None
+
+
+class ResultRunResponse(APIModel):
+    id: int
+    project_id: int
+    status: RunStatus
+    error: RunErrorResponse | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: int | None
+    config_hash: str | None
+
+
+class AnalysisResultDocument(APIModel):
+    """A stored result in the engine's own format, as ``invariant check`` prints it.
+
+    The fields up to ``diagnostics`` are those of the engine's result
+    (``schema_version`` 1); ``source`` and ``run`` say where it came from.
+    """
+
+    schema_version: int
+    engine_version: str | None
+    outcome: RunOutcome | None
+    passed: bool | None
+    fail_on: str | None
+    files: FileCountsResponse
+    rules: RuleCountsResponse
+    summary: DiagnosticCountsResponse
+    diagnostics: list[DiagnosticResponse]
+    source: ResultSourceResponse
+    run: ResultRunResponse
 
 
 class _StrictPayload(BaseModel):
@@ -369,6 +480,8 @@ class GitHubAnalysisRequest(APIModel):
 
 
 class WebhookResponse(APIModel):
-    status: Literal["ignored", "analyzed", "duplicate", "not_applicable"]
+    status: Literal["ignored", "analyzed", "duplicate"]
     analysis_run_id: int | None = None
+    # The run's outcome, for an analyzed or duplicate delivery.
+    outcome: RunOutcome | None = None
     detail: str | None = None

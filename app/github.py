@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any, Literal, Self
@@ -13,6 +14,8 @@ from app.schemas import SourceFile
 from invariant.files import MAX_FILE_BYTES, decode_source
 
 MAX_FILE_PAGES = 30
+# A Git commit ID: SHA-1, or SHA-256 for repositories that use it.
+COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 FILES_PER_PAGE = 100
 
 
@@ -22,6 +25,7 @@ class PullRequestMetadata:
     head_sha: str
     # GitHub's own count of changed files, used to detect a truncated file list.
     changed_files: int | None = None
+    base_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +151,8 @@ class GitHubClient:
             number = payload["number"]
             head_sha = payload["head"]["sha"]
             changed_files = payload.get("changed_files")
+            base = payload.get("base")
+            base_sha = base.get("sha") if isinstance(base, dict) else None
         except (AttributeError, KeyError, TypeError) as exc:
             raise GitHubAPIError(
                 status_code=502,
@@ -158,7 +164,7 @@ class GitHubClient:
             or isinstance(number, bool)
             or number < 1
             or not isinstance(head_sha, str)
-            or not head_sha
+            or not COMMIT_ID.fullmatch(head_sha)
         ):
             raise GitHubAPIError(
                 status_code=502,
@@ -171,8 +177,13 @@ class GitHubClient:
             or changed_files < 0
         ):
             changed_files = None
+        if not isinstance(base_sha, str) or not COMMIT_ID.fullmatch(base_sha):
+            base_sha = None  # only recorded, so a missing one is not fatal
         return PullRequestMetadata(
-            number=number, head_sha=head_sha, changed_files=changed_files
+            number=number,
+            head_sha=head_sha,
+            changed_files=changed_files,
+            base_sha=base_sha,
         )
 
     def get_changed_files(

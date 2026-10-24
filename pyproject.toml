@@ -1,6 +1,6 @@
 [project]
 name = "invariant"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "Deterministic architecture checks for Python code"
 readme = "README.md"
 requires-python = ">=3.14"

@@ -90,6 +90,13 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
                 "SELECT source_roots, exclude_paths, fail_on FROM projects WHERE id = 1"
             )
         ).one()
+        run = connection.execute(
+            text(
+                "SELECT status, outcome, passed, fail_on, error_count, warning_count, "
+                "analysis_error_count, files_total, started_at, config_hash "
+                "FROM analysis_runs WHERE id = 1"
+            )
+        ).one()
     assert [(row.id, row.key) for row in keys] == [
         (1, "domain-isolation"),
         (2, "domain-isolation-2"),
@@ -109,6 +116,19 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
         ("violation", "forbidden_import", "error", None, {"imported_module": "os"}),
     ]
     assert tuple(project) == (["."], [], "error")
+    # A v0.2 run keeps its verdict; what v0.2 did not record stays unknown.
+    assert tuple(run) == (
+        "completed",
+        "fail",
+        False,
+        "error",
+        2,
+        0,
+        0,
+        None,
+        None,
+        None,
+    )
 
     sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
@@ -124,6 +144,14 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
                 "domain-isolation",
                 None,
             ]
+            assert (history["outcome"], history["files"]["total"]) == ("fail", None)
+            exported = client.get("/analysis-runs/1/result").json()
+            assert (exported["outcome"], len(exported["diagnostics"])) == ("fail", 2)
+            incomplete = client.post(
+                "/projects/1/analyze",
+                json={"files": [{"path": "app/x.py", "content": "def broken(:\n"}]},
+            ).json()
+            assert incomplete["outcome"] == "incomplete"
             run = client.post(
                 "/projects/1/analyze",
                 json={
@@ -153,7 +181,15 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
     finally:
         app.dependency_overrides.pop(get_db, None)
 
-    # Downgrading drops what v0.2 cannot represent, as the migration states.
+    # Downgrading drops what v0.2 cannot represent, as the migrations state:
+    # first runs without a verdict, then rule settings and diagnostic fields.
+    migrate(monkeypatch, migration_url, "downgrade", "20261024_0004")
+    with engine.connect() as connection:
+        verdicts = connection.execute(
+            text("SELECT id, passed FROM analysis_runs ORDER BY id")
+        ).all()
+    assert incomplete["id"] not in [row.id for row in verdicts]
+    assert verdicts[0] == (1, False)
     migrate(monkeypatch, migration_url, "downgrade", "20261024_0003")
     with engine.connect() as connection:
         remaining = connection.execute(
