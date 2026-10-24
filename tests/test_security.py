@@ -22,6 +22,7 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 # which checks GitHub's signature instead.
 OPEN = {
     "/health",
+    "/ready",
     "/db-health",
     "/openapi.json",
     "/docs",

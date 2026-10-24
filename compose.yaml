@@ -14,6 +14,10 @@ x-environment: &environment
   INVARIANT_LOCAL_ONLY:
   INVARIANT_CORS_ORIGINS:
   INVARIANT_PUBLIC_URL:
+  INVARIANT_MAX_BODY_BYTES:
+  INVARIANT_RATE_LIMIT_PER_MINUTE:
+  INVARIANT_AUTH_FAILURES_PER_MINUTE:
+  INVARIANT_MAX_CONCURRENT_ANALYSES:
   INVARIANT_LOG_FORMAT:
   INVARIANT_LOG_LEVEL:
   WORKER_MAX_ATTEMPTS:
@@ -44,6 +48,13 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["uv", "run", "--no-sync", "python", "-m", "app.server"]
+    healthcheck:
+      # Ready: the database answers and its schema is this version's.
+      test: ["CMD", "python", "-m", "app.healthcheck", "api"]
+      interval: 10s
+      timeout: 7s
+      retries: 3
+      start_period: 15s
 
   # Runs the queued GitHub analyses. On SIGTERM it finishes the current run.
   worker:
@@ -53,6 +64,13 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["uv", "run", "--no-sync", "python", "-m", "app.worker"]
+    healthcheck:
+      # Alive: the worker touched its heartbeat within the lease.
+      test: ["CMD", "python", "-m", "app.healthcheck", "worker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     stop_grace_period: 2m
     restart: unless-stopped
 

@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     local_only: bool = Field(default=False, validation_alias="INVARIANT_LOCAL_ONLY")
     # Browser origins allowed to call the API, comma-separated; none by default.
     cors_origins: str = Field(default="", validation_alias="INVARIANT_CORS_ORIGINS")
+    # Limits of the API (app.limits); a rate limit of 0 is off.
+    max_body_bytes: int = Field(
+        default=16 * 1024 * 1024, ge=1024, validation_alias="INVARIANT_MAX_BODY_BYTES"
+    )
+    rate_limit_per_minute: int = Field(
+        default=60, ge=0, validation_alias="INVARIANT_RATE_LIMIT_PER_MINUTE"
+    )
+    auth_failures_per_minute: int = Field(
+        default=30, ge=0, validation_alias="INVARIANT_AUTH_FAILURES_PER_MINUTE"
+    )
+    max_concurrent_analyses: int = Field(
+        default=2, ge=1, le=64, validation_alias="INVARIANT_MAX_CONCURRENT_ANALYSES"
+    )
     # Where python -m app.server listens.
     host: str = Field(default="127.0.0.1", validation_alias="INVARIANT_HOST")
     port: int = Field(default=8000, ge=1, le=65535, validation_alias="INVARIANT_PORT")
@@ -47,6 +60,11 @@ class Settings(BaseSettings):
     worker_job_seconds: int = Field(default=300, ge=10)
     # The first retry waits this long, each next one twice as long.
     worker_retry_seconds: float = Field(default=30.0, gt=0)
+    # Touched by the worker as it goes, for its health check; empty for none.
+    worker_heartbeat_file: str = Field(
+        default="/tmp/invariant-worker-heartbeat",
+        validation_alias="INVARIANT_WORKER_HEARTBEAT",
+    )
     # One JSON object per line, or text for a terminal.
     log_format: Literal["json", "text"] = Field(
         default="json", validation_alias="INVARIANT_LOG_FORMAT"

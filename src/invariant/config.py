@@ -97,6 +97,8 @@ def _display_name(value: str) -> str:
 
 ModuleName = Annotated[str, AfterValidator(_module_name)]
 CallName = Annotated[str, AfterValidator(_call_name)]
+# Rules in one configuration, and in one project of the service.
+MAX_RULES = 500
 ModuleGlob = Annotated[str, Field(max_length=255), AfterValidator(_module_glob)]
 PathGlob = Annotated[str, Field(max_length=500), AfterValidator(_path_glob)]
 SourceRoot = Annotated[str, Field(max_length=500), AfterValidator(_source_root)]
@@ -192,7 +194,7 @@ class ProjectSettings(_Model):
 class InvariantConfig(_Model):
     version: Annotated[int, Field(strict=True)]
     project: ProjectSettings = Field(default_factory=ProjectSettings)
-    rules: list[RuleConfig] = Field(default_factory=list, max_length=500)
+    rules: list[RuleConfig] = Field(default_factory=list, max_length=MAX_RULES)
 
     @field_validator("version")
     @classmethod

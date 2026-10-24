@@ -25,6 +25,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -78,6 +79,16 @@ def _now() -> datetime:
 
 def _ms(began: float) -> int:
     return round((time.monotonic() - began) * 1000)
+
+
+def beat(heartbeat: Path | None) -> None:
+    """Touch the heartbeat file: the worker is alive and looking for work."""
+    if heartbeat is None:
+        return
+    try:
+        heartbeat.touch()
+    except OSError:
+        logger.warning("The heartbeat file %s cannot be written", heartbeat)
 
 
 def recover_expired(db: Session, policy: Policy, now: datetime) -> int:
@@ -274,8 +285,12 @@ def run_worker(
     github_factory = github_factory or (lambda: GitHubClient(settings))
     worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
     stop = stop or threading.Event()
+    heartbeat = (
+        Path(settings.worker_heartbeat_file) if settings.worker_heartbeat_file else None
+    )
     processed = 0
     while not stop.is_set():
+        beat(heartbeat)
         with session_factory() as db:
             now = _now()
             recover_expired(db, policy, now)

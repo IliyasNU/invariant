@@ -10,6 +10,11 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 # The test client presents this key, as every client of the API must.
 os.environ["INVARIANT_API_KEY"] = API_KEY = "test-api-key-" + "k" * 32
+# Tests send many requests at once; tests of the limits set their own.
+os.environ["INVARIANT_RATE_LIMIT_PER_MINUTE"] = "0"
+os.environ["INVARIANT_AUTH_FAILURES_PER_MINUTE"] = "0"
+# Workers in tests keep no heartbeat file, but the test of it.
+os.environ["INVARIANT_WORKER_HEARTBEAT"] = ""
 
 from app.database import engine
 from app.main import app
