@@ -382,4 +382,6 @@ def verify_webhook_signature(body: bytes, signature: str | None, secret: str) ->
     expected = (
         "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     )
-    return hmac.compare_digest(expected, signature)
+    # As bytes: compare_digest refuses a str with non-ASCII characters, and a
+    # header may hold any Latin-1 character.
+    return hmac.compare_digest(expected.encode(), signature.encode("utf-8"))
