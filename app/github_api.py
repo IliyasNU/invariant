@@ -21,6 +21,7 @@ from app.schemas import (
     PullRequestEvent,
     WebhookResponse,
 )
+from app.security import APIKey
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,6 +46,7 @@ def _project_or_404(project_id: int, db: Session) -> Project:
     "/projects/{project_id}/analyze/github",
     response_model=AnalysisRunSummaryResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[APIKey],
 )
 def analyze_github_project(
     project_id: int, payload: GitHubAnalysisRequest, db: DatabaseSession
@@ -59,6 +61,7 @@ def analyze_github_project(
     return enqueue_github_analysis(db, project, payload.pull_number, source="github_pr")
 
 
+# GitHub signs its deliveries; the webhook checks that instead of the API key.
 @router.post(
     "/integrations/github/webhook",
     response_model=WebhookResponse,

@@ -139,7 +139,8 @@ def test_v02_data_survives_the_upgrade_and_the_api_runs_on_it(
 
     app.dependency_overrides[get_db] = migrated_db
     try:
-        with TestClient(app) as client:
+        key = os.environ["INVARIANT_API_KEY"]
+        with TestClient(app, headers={"Authorization": f"Bearer {key}"}) as client:
             history = client.get("/analysis-runs/1").json()
             assert [item["rule_key"] for item in history["violations"]] == [
                 "domain-isolation",

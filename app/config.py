@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     github_webhook_secret: str | None = None
     github_post_pr_comment: bool = False
     github_api_url: str = "https://api.github.com"
+    # The operator's key for the API: every request presents it as
+    # "Authorization: Bearer <key>".
+    api_key: SecretStr | None = Field(
+        default=None, validation_alias="INVARIANT_API_KEY"
+    )
+    # Without a key the API starts only when this says that it is reachable
+    # from this machine alone.
+    local_only: bool = Field(default=False, validation_alias="INVARIANT_LOCAL_ONLY")
+    # Browser origins allowed to call the API, comma-separated; none by default.
+    cors_origins: str = Field(default="", validation_alias="INVARIANT_CORS_ORIGINS")
     # Where python -m app.server listens.
     host: str = Field(default="127.0.0.1", validation_alias="INVARIANT_HOST")
     port: int = Field(default=8000, ge=1, le=65535, validation_alias="INVARIANT_PORT")
@@ -50,9 +60,24 @@ class Settings(BaseSettings):
     def _upper(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
 
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
+
     def secrets(self) -> list[str]:
         """Configured values that must never appear in a log."""
         values = [self.github_token, self.github_webhook_secret]
+        if self.api_key is not None:
+            values.append(self.api_key.get_secret_value())
         # The documented local password is not a secret, and would redact the
         # name of the project from every line.
         if self.postgres_password != "invariant":
