@@ -381,6 +381,45 @@ def test_paths_with_control_characters_are_rejected(client, path):
     assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
 
 
+# Above the largest INTEGER the database stores, and above a 64-bit integer.
+TOO_LARGE = (2**31, 10**20)
+
+
+@pytest.mark.parametrize("number", TOO_LARGE)
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("get", "/projects/{n}", None),
+        ("patch", "/projects/{n}", {"name": "Renamed"}),
+        ("delete", "/projects/{n}", None),
+        ("get", "/projects/{id}/rules/{n}", None),
+        ("get", "/analysis-runs/{n}", None),
+        ("get", "/analysis-runs/{n}/diagnostics", None),
+        ("get", "/projects?offset={n}", None),
+        ("get", "/projects/{id}/analysis-runs?pull_number={n}", None),
+        ("post", "/projects/{id}/analyze/github", {"pull_number": "{n}"}),
+    ],
+)
+def test_out_of_range_numbers_are_refused_not_a_server_error(
+    client, method, path, body, number
+):
+    project = client.post(
+        "/projects", json={"name": "Big", "github_owner": "o", "github_repo": "r"}
+    ).json()
+    url = path.format(id=project["id"], n=number)
+    options = {}
+    if body is not None:
+        options["json"] = {
+            name: number if value == "{n}" else value for name, value in body.items()
+        }
+
+    response = getattr(client, method)(url, **options)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert client.get(f"/projects/{project['id']}/analysis-runs").json() == []
+
+
 def test_stored_text_rejects_control_characters(client):
     assert client.post("/projects", json={"name": "a\u0000b"}).status_code == 422
     assert (

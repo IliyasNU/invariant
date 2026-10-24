@@ -31,6 +31,9 @@ from invariant.config import (
 from invariant.paths import PathError, normalize_path
 
 GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+# The largest INTEGER the database stores: IDs and pull request numbers above
+# it cannot name anything, and PostgreSQL rejects them as out of range.
+MAX_INTEGER = 2**31 - 1
 # PostgreSQL cannot store NUL, and other control characters only break output.
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # Free text may keep tabs and line breaks.
@@ -485,7 +488,7 @@ class _GitHubRepository(_StrictPayload):
 
 
 class _GitHubPullRequest(_StrictPayload):
-    number: int = Field(ge=1)
+    number: int = Field(ge=1, le=MAX_INTEGER)
 
 
 class PullRequestEvent(_StrictPayload):
@@ -523,7 +526,7 @@ class ConfigImportPlan(APIModel):
 
 
 class GitHubAnalysisRequest(APIModel):
-    pull_number: int = Field(ge=1)
+    pull_number: int = Field(ge=1, le=MAX_INTEGER)
 
 
 class WebhookResponse(APIModel):

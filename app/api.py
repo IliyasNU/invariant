@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy import Select, func, select
@@ -16,6 +16,7 @@ from app.errors import APIError
 from app.limits import rate_limited
 from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import (
+    MAX_INTEGER,
     AnalysisRequest,
     AnalysisResultDocument,
     AnalysisRunResponse,
@@ -62,8 +63,10 @@ PAGINATED: dict[int | str, dict[str, Any]] = {
         }
     }
 }
+# IDs are positive and stored as INTEGER; any other number names nothing.
+ID = Annotated[int, Path(ge=1, le=MAX_INTEGER)]
 Limit = Annotated[int, Query(ge=1, le=500, description="Items per page")]
-Offset = Annotated[int, Query(ge=0, description="Items to skip")]
+Offset = Annotated[int, Query(ge=0, le=MAX_INTEGER, description="Items to skip")]
 Filter = Annotated[str | None, Query(min_length=1, max_length=500)]
 
 
@@ -147,13 +150,13 @@ def list_projects(
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
-def get_project(project_id: int, db: DatabaseSession) -> Project:
+def get_project(project_id: ID, db: DatabaseSession) -> Project:
     return _project_or_404(project_id, db)
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectResponse)
 def update_project(
-    project_id: int, payload: ProjectUpdate, db: DatabaseSession
+    project_id: ID, payload: ProjectUpdate, db: DatabaseSession
 ) -> Project:
     project = _project_or_404(project_id, db)
     for field, value in payload.model_dump(exclude_unset=True).items():
@@ -171,7 +174,7 @@ def update_project(
         "history (runs and violations). This cannot be undone."
     ),
 )
-def delete_project(project_id: int, db: DatabaseSession) -> None:
+def delete_project(project_id: ID, db: DatabaseSession) -> None:
     db.delete(_project_or_404(project_id, db))
     db.commit()
 
@@ -181,7 +184,7 @@ def delete_project(project_id: int, db: DatabaseSession) -> None:
     response_model=RuleResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_rule(project_id: int, payload: RuleCreate, db: DatabaseSession) -> Rule:
+def create_rule(project_id: ID, payload: RuleCreate, db: DatabaseSession) -> Rule:
     _project_or_404(project_id, db)
     rules = db.scalar(select(func.count()).where(Rule.project_id == project_id))
     if rules >= MAX_RULES:
@@ -212,7 +215,7 @@ def create_rule(project_id: int, payload: RuleCreate, db: DatabaseSession) -> Ru
     responses=PAGINATED,
 )
 def list_rules(
-    project_id: int,
+    project_id: ID,
     db: DatabaseSession,
     response: Response,
     limit: Limit = 100,
@@ -224,13 +227,13 @@ def list_rules(
 
 
 @router.get("/projects/{project_id}/rules/{rule_id}", response_model=RuleResponse)
-def get_rule(project_id: int, rule_id: int, db: DatabaseSession) -> Rule:
+def get_rule(project_id: ID, rule_id: ID, db: DatabaseSession) -> Rule:
     return _rule_or_404(project_id, rule_id, db)
 
 
 @router.patch("/projects/{project_id}/rules/{rule_id}", response_model=RuleResponse)
 def update_rule(
-    project_id: int, rule_id: int, payload: RuleUpdate, db: DatabaseSession
+    project_id: ID, rule_id: ID, payload: RuleUpdate, db: DatabaseSession
 ) -> Rule:
     rule = _rule_or_404(project_id, rule_id, db)
     merged = {**rule_data(rule), **payload.model_dump(exclude_unset=True)}
@@ -244,7 +247,7 @@ def update_rule(
 @router.delete(
     "/projects/{project_id}/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT
 )
-def delete_rule(project_id: int, rule_id: int, db: DatabaseSession) -> None:
+def delete_rule(project_id: ID, rule_id: ID, db: DatabaseSession) -> None:
     # Past violations keep their rule_name snapshot; rule_id becomes NULL.
     db.delete(_rule_or_404(project_id, rule_id, db))
     db.commit()
@@ -256,7 +259,7 @@ def delete_rule(project_id: int, rule_id: int, db: DatabaseSession) -> None:
     responses={200: {"content": {"application/toml": {}}}},
     description="The project's settings and rules as an invariant.toml file.",
 )
-def export_project_config(project_id: int, db: DatabaseSession) -> Response:
+def export_project_config(project_id: ID, db: DatabaseSession) -> Response:
     project = _project_or_404(project_id, db)
     return Response(
         content=export_config(project, _project_rules(project_id, db)),
@@ -270,7 +273,7 @@ def export_project_config(project_id: int, db: DatabaseSession) -> Response:
     dependencies=[RateLimited],
 )
 def import_project_config(
-    project_id: int, payload: ConfigImportRequest, db: DatabaseSession
+    project_id: ID, payload: ConfigImportRequest, db: DatabaseSession
 ) -> ConfigImportPlan:
     """Apply an invariant.toml to the project, or preview it with dry_run.
 
@@ -318,7 +321,7 @@ def import_project_config(
     dependencies=[RateLimited],
 )
 def analyze_project(
-    project_id: int, payload: AnalysisRequest, db: DatabaseSession, request: Request
+    project_id: ID, payload: AnalysisRequest, db: DatabaseSession, request: Request
 ) -> AnalysisRun:
     project = _project_or_404(project_id, db)
     with request.app.state.analysis_slots.slot():
@@ -331,7 +334,7 @@ def analyze_project(
     responses=PAGINATED,
 )
 def list_analysis_runs(
-    project_id: int,
+    project_id: ID,
     db: DatabaseSession,
     response: Response,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -339,7 +342,7 @@ def list_analysis_runs(
     run_status: Annotated[RunStatus | None, Query(alias="status")] = None,
     outcome: RunOutcome | None = None,
     source: Literal["direct", "github_pr", "github_webhook"] | None = None,
-    pull_number: Annotated[int | None, Query(ge=1)] = None,
+    pull_number: Annotated[int | None, Query(ge=1, le=MAX_INTEGER)] = None,
 ) -> list[AnalysisRun]:
     """The project's runs, newest first, optionally filtered."""
     _project_or_404(project_id, db)
@@ -357,7 +360,7 @@ def list_analysis_runs(
 
 
 @router.get("/projects/{project_id}/stats", response_model=ProjectStatsResponse)
-def project_stats(project_id: int, db: DatabaseSession) -> dict[str, Any]:
+def project_stats(project_id: ID, db: DatabaseSession) -> dict[str, Any]:
     """Counts over all of the project's runs.
 
     The pass rate only counts runs with a verdict (pass or fail); how many runs
@@ -428,7 +431,7 @@ def project_stats(project_id: int, db: DatabaseSession) -> dict[str, Any]:
 
 
 @router.get("/analysis-runs/{analysis_run_id}", response_model=AnalysisRunResponse)
-def get_analysis_run(analysis_run_id: int, db: DatabaseSession) -> AnalysisRun:
+def get_analysis_run(analysis_run_id: ID, db: DatabaseSession) -> AnalysisRun:
     return _run_or_404(analysis_run_id, db)
 
 
@@ -438,7 +441,7 @@ def get_analysis_run(analysis_run_id: int, db: DatabaseSession) -> AnalysisRun:
     responses=PAGINATED,
 )
 def list_diagnostics(
-    analysis_run_id: int,
+    analysis_run_id: ID,
     db: DatabaseSession,
     response: Response,
     limit: Limit = 100,
@@ -473,7 +476,7 @@ def list_diagnostics(
     response_model=AnalysisResultDocument,
     summary="Export a run's result as JSON",
 )
-def get_analysis_result(analysis_run_id: int, db: DatabaseSession) -> dict[str, Any]:
+def get_analysis_result(analysis_run_id: ID, db: DatabaseSession) -> dict[str, Any]:
     """The result in the engine's format (``schema_version`` 1), as the CLI writes it.
 
     Source code is never stored, so it is not part of the result.

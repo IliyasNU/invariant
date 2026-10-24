@@ -369,6 +369,7 @@ def valid_event(**changes) -> dict:
         valid_event(pull_request={"number": "12"}),
         valid_event(pull_request={"number": True}),
         valid_event(pull_request={"number": 0}),
+        valid_event(pull_request={"number": 2**31}),
         valid_event(pull_request=[]),
     ],
 )
