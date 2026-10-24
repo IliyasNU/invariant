@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy import Select, func, select
@@ -13,6 +13,7 @@ from app.analysis_service import load_analysis_run, persist_analysis, result_doc
 from app.config_service import SOURCE, apply_import, export_config, plan_import
 from app.database import get_db
 from app.errors import APIError
+from app.limits import rate_limited
 from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import (
     AnalysisRequest,
@@ -34,11 +35,13 @@ from app.schemas import (
     SettingChange,
 )
 from app.security import APIKey
-from invariant.config import RULES, ConfigError, RuleConfig, parse_config
+from invariant.config import MAX_RULES, RULES, ConfigError, RuleConfig, parse_config
 
 # The whole business API requires the operator's key.
 router = APIRouter(dependencies=[APIKey])
 DatabaseSession = Annotated[Session, Depends(get_db)]
+# Analyses and imports take time; each client may start only so many.
+RateLimited = Depends(rate_limited)
 RULE_CONFLICT = (
     "rule_conflict",
     "A rule with this key or name already exists in the project",
@@ -112,6 +115,11 @@ def _validated_rule(data: dict[str, Any]) -> RuleConfig:
         raise RequestValidationError(errors) from exc
 
 
+def _too_many_rules() -> APIError:
+    # As many as one configuration file holds, so that an export imports.
+    return APIError(409, "too_many_rules", f"A project has at most {MAX_RULES} rules")
+
+
 def _commit(db: Session, conflict: tuple[str, str]) -> None:
     try:
         db.commit()
@@ -175,6 +183,9 @@ def delete_project(project_id: int, db: DatabaseSession) -> None:
 )
 def create_rule(project_id: int, payload: RuleCreate, db: DatabaseSession) -> Rule:
     _project_or_404(project_id, db)
+    rules = db.scalar(select(func.count()).where(Rule.project_id == project_id))
+    if rules >= MAX_RULES:
+        raise _too_many_rules()
     data = payload.model_dump()
     if data["key"] is None and data["name"] is None:
         raise RequestValidationError(
@@ -253,7 +264,11 @@ def export_project_config(project_id: int, db: DatabaseSession) -> Response:
     )
 
 
-@router.post("/projects/{project_id}/config/import", response_model=ConfigImportPlan)
+@router.post(
+    "/projects/{project_id}/config/import",
+    response_model=ConfigImportPlan,
+    dependencies=[RateLimited],
+)
 def import_project_config(
     project_id: int, payload: ConfigImportRequest, db: DatabaseSession
 ) -> ConfigImportPlan:
@@ -277,6 +292,8 @@ def import_project_config(
                 for location, message in exc.problems
             ],
         ) from exc
+    if len(rules) - len(plan.deleted) + len(plan.created) > MAX_RULES:
+        raise _too_many_rules()
     if not payload.dry_run:
         apply_import(db, project, plan)
         _commit(db, RULE_CONFLICT)
@@ -295,12 +312,17 @@ def import_project_config(
     )
 
 
-@router.post("/projects/{project_id}/analyze", response_model=AnalysisRunResponse)
+@router.post(
+    "/projects/{project_id}/analyze",
+    response_model=AnalysisRunResponse,
+    dependencies=[RateLimited],
+)
 def analyze_project(
-    project_id: int, payload: AnalysisRequest, db: DatabaseSession
+    project_id: int, payload: AnalysisRequest, db: DatabaseSession, request: Request
 ) -> AnalysisRun:
     project = _project_or_404(project_id, db)
-    return persist_analysis(db, project, payload.files, source="direct")
+    with request.app.state.analysis_slots.slot():
+        return persist_analysis(db, project, payload.files, source="direct")
 
 
 @router.get(

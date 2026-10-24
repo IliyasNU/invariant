@@ -21,6 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import Settings
 from app.errors import APIError
+from app.limits import client_address, too_many
 
 logger = logging.getLogger(__name__)
 
@@ -83,20 +84,22 @@ def require_api_key(
     expected = request.app.state.settings.api_key
     if expected is None:
         return
-    challenge = {"WWW-Authenticate": "Bearer"}
     if credentials is None:
-        raise APIError(
-            401,
-            "unauthorized",
-            "An API key is required: Authorization: Bearer <key>",
-            headers=challenge,
-        )
-    if not hmac.compare_digest(
+        _refuse(request, "An API key is required: Authorization: Bearer <key>")
+    elif not hmac.compare_digest(
         credentials.credentials.encode(), expected.get_secret_value().encode()
     ):
-        raise APIError(
-            401, "unauthorized", "The API key is not valid", headers=challenge
+        _refuse(request, "The API key is not valid")
+
+
+def _refuse(request: Request, message: str) -> None:
+    # Only failures count, so a client with the key is never slowed down.
+    wait = request.app.state.auth_failures.wait(client_address(request))
+    if wait is not None:
+        raise too_many(
+            wait, "too_many_failed_keys", "Too many requests without a valid API key"
         )
+    raise APIError(401, "unauthorized", message, headers={"WWW-Authenticate": "Bearer"})
 
 
 APIKey = Depends(require_api_key)

@@ -14,6 +14,7 @@ from app.config import Settings
 from app.database import get_db
 from app.errors import APIError
 from app.github import verify_webhook_signature
+from app.limits import rate_limited
 from app.models import AnalysisRun, Project
 from app.schemas import (
     AnalysisRunSummaryResponse,
@@ -46,7 +47,7 @@ def _project_or_404(project_id: int, db: Session) -> Project:
     "/projects/{project_id}/analyze/github",
     response_model=AnalysisRunSummaryResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[APIKey],
+    dependencies=[APIKey, Depends(rate_limited)],
 )
 def analyze_github_project(
     project_id: int, payload: GitHubAnalysisRequest, db: DatabaseSession
