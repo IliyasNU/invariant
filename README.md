@@ -51,9 +51,12 @@ flowchart LR
   `max_file_lines`),
   `enabled`, `severity`, `source_pattern`, `exclude_paths` and the fields of
   its type.
-- An **AnalysisRun** records its source (`direct`, `github_pr`, or
-  `github_webhook`), status, pass/fail result, repository/PR metadata, counts,
-  and creation time.
+- An **AnalysisRun** is one analysis attempt: its source (`direct`,
+  `github_pr` or `github_webhook`), its status and outcome (see
+  [Results](#results)), file, rule and diagnostic counts, timing, the engine
+  version, a snapshot and hash of the configuration it checked, and for GitHub
+  the repository, pull request, base and head commits and delivery ID. Source
+  code is never stored.
 - An **AnalysisViolation** is a diagnostic: its kind, code and severity, a
   snapshot of the rule's key and name, the location, and data for the rule
   type. History stays readable when rules change or are deleted.
@@ -299,8 +302,7 @@ curl -X POST http://127.0.0.1:8000/projects/1/analyze \
   }'
 ```
 
-Direct analysis now returns and persists an analysis run while preserving the
-v0.1 summary and violation fields:
+Direct analysis records a run and returns it. Abridged:
 
 ```json
 {
@@ -308,39 +310,78 @@ v0.1 summary and violation fields:
   "project_id": 1,
   "source": "direct",
   "status": "completed",
+  "outcome": "fail",
   "passed": false,
-  "pull_number": null,
-  "repository_owner": "example-org",
-  "repository_name": "payments",
+  "fail_on": "error",
+  "files": {"total": 1, "eligible": 1, "analyzed": 1, "excluded": 0, "skipped": 0, "ignored": 0},
+  "rules": {"total": 1, "enabled": 1, "evaluations": 1},
+  "summary": {"errors": 1, "warnings": 0, "analysis_errors": 0},
+  "error": null,
+  "started_at": "2026-10-24T08:00:00.035517Z",
+  "finished_at": "2026-10-24T08:00:00.037113Z",
+  "duration_ms": 2,
+  "engine_version": "0.3.0.dev0",
+  "config_hash": "854dd572b1b82b530ac58bcead403f192029ad166ca0cfaaf8d941fe7911f97a",
   "files_analyzed": 1,
   "rules_evaluated": 1,
   "violation_count": 1,
-  "created_at": "2026-09-06T08:00:00Z",
+  "config": {"version": 1, "project": {"source_roots": ["."], "exclude_paths": [], "fail_on": "error"}, "rules": ["..."]},
   "violations": [{
     "id": 73,
-    "analysis_run_id": 42,
+    "kind": "violation",
+    "code": "forbidden_import",
+    "severity": "error",
     "rule_id": 1,
-    "rule_name": "domain isolation",
+    "rule_key": "domain-isolation",
+    "rule_name": "Domain isolation",
     "path": "app/domain/payment.py",
     "line": 1,
     "column": 1,
     "imported_module": "app.infrastructure.db",
-    "message": "app.domain.payment must not import app.infrastructure (matched app.infrastructure.db)"
+    "message": "app.domain.payment must not import app.infrastructure (matched app.infrastructure.db)",
+    "data": {"imported_module": "app.infrastructure.db", "forbidden": "app.infrastructure"}
   }]
 }
 ```
 
-Violations carry `kind`, `code` (the rule type), `severity`, `rule_key` and
-type-specific `data` in addition to the fields above. `passed` is false only
-when a violation reaches the project's `fail_on` severity: warnings are
-reported but pass by default.
-
-Malformed Python returns a structured `422 invalid_python` response and does not
-create a completed analysis run. File paths must be relative, end in `.py`, and
-contain no `..` segment and no control characters. Project and rule names may
-not contain control characters either; descriptions may contain tabs and line
+`violations` holds every diagnostic: rule violations, and `error` entries for
+files that could not be analyzed. A file with a syntax error, or one too
+deeply nested to parse, no longer rejects the request: the other files are
+still checked, and the run is `fail` if one of them violates a rule and
+`incomplete` otherwise. File paths must be relative, end in `.py`, and contain
+no `..` segment and no control characters. Project and rule names may not
+contain control characters either; descriptions may contain tabs and line
 breaks.
 
+### Results
+
+A run's `status` says whether the analysis ran; its `outcome` says what a
+completed run found:
+
+| `status` | `outcome` | `passed` | Meaning |
+| --- | --- | --- | --- |
+| `completed` | `pass` | `true` | Every applicable check ran; no violation reaches `fail_on` |
+| `completed` | `fail` | `false` | A violation reaches `fail_on` |
+| `completed` | `incomplete` | `null` | A file could not be analyzed, so there is no verdict |
+| `completed` | `not_applicable` | `null` | Nothing was checked: no eligible file, or no enabled rule applies |
+| `failed` | `null` | `null` | The analysis could not run; `error` has a safe `code` and `message` |
+| `queued`, `running` | `null` | `null` | Reserved for background analysis |
+
+The database enforces these combinations. Warnings never fail the default
+`fail_on = "error"`. `files`, `rules` and `summary` count what was checked
+(`files.total = eligible + excluded + ignored`, `eligible = analyzed +
+skipped`); runs recorded by v0.2 keep their verdict, with the counters v0.2
+did not record set to `null`. The flat `files_analyzed`, `rules_evaluated`
+and `violation_count` fields are kept for v0.2 clients. `config` is the
+project settings and rules as they were at analysis time, so editing or
+deleting a rule never rewrites an earlier result.
+
+Changes from v0.2, starting with version 0.3.0.dev0: `passed` can be `null`; a file that
+cannot be parsed makes the run `incomplete` instead of a `422 invalid_python`;
+incomplete, not-applicable and failed GitHub analyses are stored instead of
+refused; a project without applicable rules no longer passes.
+
+### Manual GitHub pull request analysis
 ### Manual GitHub pull request analysis
 
 The project must have GitHub owner/repository configuration:
@@ -356,22 +397,24 @@ API, downloads each changed Python file at the PR head SHA, runs the shared AST
 analyzer, persists the result, and returns the full run. Removed and non-Python
 files are outside the analysis.
 
-A run means something only if every changed Python file was checked. In two
-cases Invariant therefore returns a structured `422` instead of a run, and posts
-no PR comment:
+Every analysis is recorded and returned as a run. If a changed `.py` file is
+over 1 MB (`too_large`), not UTF-8 (`undecodable`) or has a path the API
+rejects (`invalid_path`), or GitHub listed fewer files than the pull request
+changes (`file_list_truncated`), the run is `incomplete` and lists each of
+these as an `error` diagnostic. A pull request that changes no Python file, or
+none that an enabled rule applies to, is `not_applicable`. Neither posts a PR
+comment.
 
-| Code | When | Extra fields |
-| --- | --- | --- |
-| `analysis_incomplete` | A changed `.py` file is over 1 MB (`too_large`), is not UTF-8 (`undecodable`) or has a path the API rejects (`invalid_path`); or GitHub listed fewer files than the PR changes | `skipped` (`path`, `reason`), `file_list_truncated` |
-| `not_applicable` | The PR changes no Python files, or no enabled rule applies to the changed ones (for example, all are excluded) | `ignored_files` |
+When GitHub cannot be used (404, rate limit, authorization failure, malformed
+response, network failure), the run is recorded as `failed` with the error's
+code, and the request returns the matching status with the run's ID, never
+credentials or upstream payloads:
 
-v0.2 does not store these outcomes. Persisted `incomplete` and
-`not_applicable` results are planned for v1.0.
+```json
+{"detail": {"code": "github_rate_limited", "message": "GitHub API rate limit exceeded", "analysis_run_id": 43}}
+```
 
-GitHub 404s, rate limits, authorization failures, malformed responses, and
-network failures are translated to structured API errors without exposing
-credentials or upstream payloads.
-
+### Analysis history
 ### Analysis history
 
 ```bash
@@ -382,8 +425,14 @@ curl http://127.0.0.1:8000/analysis-runs/42
 
 The project endpoint returns newest-first summaries, 50 per page by default
 (`limit` 1–200, `offset` ≥ 0). The global run endpoint
-returns the summary plus persisted violations. Missing projects or runs return
-404.
+returns the summary plus the configuration snapshot and the diagnostics.
+Missing projects or runs return 404.
+
+`GET /analysis-runs/{id}/result` exports a run in the engine's own result
+format (`schema_version` 1), the document `invariant check --format json`
+prints, with a `source` (where the files came from, with commits) and a `run`
+(status, error, timing, configuration hash) section. A client can read it
+without knowing the rest of the API.
 
 ### Errors
 
@@ -407,17 +456,20 @@ comparison before parsing or acting on the payload. It analyzes pull request
 actions `opened`, `synchronize`, and `reopened`; other events/actions return a
 clean `202 ignored` response.
 
-A pull request without Python files returns `202` with status
-`not_applicable`. An incomplete analysis returns the same
-`422 analysis_incomplete` as the manual endpoint. The payload fields Invariant
-uses are type-checked before use: a signed request with, for example,
-`"action": []` or a string pull request number gets
-`400 invalid_webhook_payload`; an unsigned request still gets `401`.
+An analyzed delivery returns `200` with `{"status": "analyzed",
+"analysis_run_id": ..., "outcome": ...}`, including for incomplete and
+not-applicable results. A GitHub failure records a failed run and returns the
+same error as the manual endpoint. The payload fields Invariant uses are
+type-checked before use: a signed request with, for example, `"action": []`
+or a string pull request number gets `400 invalid_webhook_payload`; an
+unsigned request still gets `401`.
 
 For relevant events, repository owner/name selects the configured project. The
 `X-GitHub-Delivery` value is persisted with a unique constraint, so retrying the
-same delivery returns the existing run instead of creating a duplicate. Manual
-and webhook-triggered PR analyses use the same code path.
+same delivery returns the existing run (`"status": "duplicate"`) instead of
+creating a duplicate, even when that run failed; analyze the pull request
+again with the manual endpoint. Manual and webhook-triggered PR analyses use
+the same code path.
 
 ### Optional PR feedback
 
@@ -429,7 +481,7 @@ GITHUB_POST_PR_COMMENT=true
 ```
 
 Invariant posts either `Invariant: PASS` or a concise violation list, and only
-for a stored run: incomplete and not-applicable analyses post nothing. A comment
+for a verdict: incomplete, not-applicable and failed analyses post nothing. A comment
 failure is logged without secrets and does not roll back or fail the completed
 analysis. GitHub Check Runs are intentionally out of scope for v0.2.
 
@@ -477,11 +529,13 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 - GitHub content is limited to changed, non-deleted `.py` files that decode as
   UTF-8 and are at most 1 MB. GitHub exposes at most 3,000 changed files for one
   pull request through this REST endpoint. A pull request beyond these limits
-  is reported as `analysis_incomplete`, never analyzed partially, and that
-  outcome is not stored in the history.
-- Direct analysis of a project without rules, or of files that no rule
-  covers, still produces `passed: true`; such runs are not yet told apart from
-  a real pass (GitHub analysis refuses them as `not_applicable`).
+  is recorded as `incomplete`, never as a pass.
+- History keeps results, diagnostics, counts, configuration snapshots and
+  commit IDs, but never source code. There is no retention policy yet: runs
+  are kept until their project is deleted.
+- A failed webhook analysis is not retried, and redelivering the same
+  delivery returns the failed run; the background worker planned for v1.0
+  retries.
 - Columns count Unicode characters, 1-based. Runs stored before this change
   recorded UTF-8 byte offsets, which differ only after non-ASCII text on the
   same line.
