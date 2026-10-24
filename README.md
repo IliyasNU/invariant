@@ -167,6 +167,11 @@ by default, avoiding a common conflict with host PostgreSQL installations. Set
 | `INVARIANT_API_KEY` | unset | The API's key, at least 32 characters; see [API key and exposure](#api-key-and-exposure) |
 | `INVARIANT_LOCAL_ONLY` | `false` | Start without a key, for an API only this machine can reach |
 | `INVARIANT_CORS_ORIGINS` | unset | Browser origins allowed to call the API, comma-separated |
+| `INVARIANT_MAX_BODY_BYTES` | `16777216` | Largest request body (16 MiB); see [Limits](#limits) |
+| `INVARIANT_RATE_LIMIT_PER_MINUTE` | `60` | Analyses and imports per client and minute; `0` is no limit |
+| `INVARIANT_AUTH_FAILURES_PER_MINUTE` | `30` | Requests without a valid key per client and minute; `0` is no limit |
+| `INVARIANT_MAX_CONCURRENT_ANALYSES` | `2` | Direct analyses that run at once |
+| `INVARIANT_WORKER_HEARTBEAT` | `/tmp/invariant-worker-heartbeat` | File the worker touches, for its health check; empty for none |
 | `INVARIANT_HOST` | `127.0.0.1` | Where `python -m app.server` listens (`0.0.0.0` in the image) |
 | `INVARIANT_PORT` | `8000` | Its port |
 | `INVARIANT_LOG_FORMAT` | `json` | `json`: one object per line; `text`: for a terminal |
@@ -668,6 +673,46 @@ late analysis never presents an old PASS as current. Without the token and
 the opt-in, Invariant writes nothing to GitHub. GitHub Check Runs are out of
 scope for v1.0.
 
+## Limits
+
+| What | Limit | Beyond it |
+| --- | --- | --- |
+| A request body | `INVARIANT_MAX_BODY_BYTES`, 16 MiB | `413 request_too_large`, before the body is read whole |
+| A direct analysis | 500 files, each at most 1 MB | `422 validation_error` |
+| Rules | 500 per project, as in one configuration file | `409 too_many_rules` |
+| Modules or calls in one rule | 100 | `422 validation_error` |
+| Python nested too deeply to parse | the parser's own limit | an `error` diagnostic (`too_complex`); the run is `incomplete` |
+| Analyses and configuration imports | `INVARIANT_RATE_LIMIT_PER_MINUTE`, 60 per client | `429 too_many_requests`, with `Retry-After` |
+| Requests without a valid key | `INVARIANT_AUTH_FAILURES_PER_MINUTE`, 30 per client | `429 too_many_failed_keys`; the right key is never slowed down |
+| Direct analyses at once | `INVARIANT_MAX_CONCURRENT_ANALYSES`, 2 | `429 too_many_concurrent_analyses` after 5 seconds without a free slot |
+| GitHub downloads | 1 MB a file, 50 MB a pull request, `WORKER_JOB_SECONDS` | `too_large` or `limit_exceeded`; the run is `incomplete` |
+
+Rate limits count per API process and client address (behind a proxy, every
+client has the proxy's address); `0` turns one off. The webhook is not rate
+limited, since GitHub does not deliver a refused event again by itself.
+
+The largest direct analysis the API accepts, 500 files of 31 KB (15.4 MiB)
+against one rule of each type, took 10 seconds and grew the API process by
+39 MiB, from 134 to 173 MiB, on 4 vCPUs with Python 3.14.6 and PostgreSQL
+16. `scripts/measure_limits.py` repeats the measurement against a migrated
+database. With two analyses at once, plan for twice that above the API's
+resting memory.
+
+## Health checks
+
+- `GET /health` is liveness: it answers `200` while the process runs.
+- `GET /ready` is readiness: `200 {"status": "ready"}` when the database
+  answers and its schema is at this version's migration, otherwise
+  `503 database_unavailable` or `503 not_migrated`. Like `/health`, it needs
+  no key and shows no settings. `/db-health` remains for v0.2 clients.
+- `python -m app.healthcheck api` exits 0 when `/ready` answers `200`, and
+  `python -m app.healthcheck worker` when the worker touched its heartbeat
+  file (`INVARIANT_WORKER_HEARTBEAT`) within `WORKER_LEASE_SECONDS` plus a
+  minute: an idle worker touches it every poll, a busy one after each run,
+  and a hung one not at all. Both use only the standard library, and Compose
+  runs them as the `app` and `worker` health checks, so `docker compose ps`
+  shows a database outage on the API and a hung worker on its own.
+
 ## Logs
 
 `python -m app.server` and `python -m app.worker` write one JSON object per
@@ -714,8 +759,8 @@ uv sync --dev
 uv run pytest
 INVARIANT_TEST_DATABASE_URL=postgresql+psycopg://invariant:invariant@localhost:5433/invariant_test \
   uv run pytest
-uv run ruff check app examples migrations src tests
-uv run ruff format --check app examples migrations src tests
+uv run ruff check app examples migrations scripts src tests
+uv run ruff format --check app examples migrations scripts src tests
 uv run python -m compileall -q app migrations src tests
 uv run invariant check .
 ```
