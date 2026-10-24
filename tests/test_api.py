@@ -58,6 +58,33 @@ def test_project_github_configuration(client):
     )
 
 
+@pytest.mark.parametrize(
+    ("owner", "repo"), [("..", "invariant"), ("iliyasnu", ".."), (".", ".")]
+)
+def test_github_names_cannot_be_dot_segments(client, owner, repo):
+    # "/repos/../../pulls/1" is "/pulls/1" once the URL is resolved: the
+    # token would be sent to an endpoint other than the repository's.
+    project = create_project(client, name="Dot segments")
+
+    created = client.post(
+        "/projects",
+        json={"name": "Dots", "github_owner": owner, "github_repo": repo},
+    )
+    updated = client.patch(
+        f"/projects/{project['id']}",
+        json={"github_owner": owner, "github_repo": repo},
+    )
+
+    assert (created.status_code, updated.status_code) == (422, 422)
+    assert (
+        client.post(
+            "/projects",
+            json={"name": "Dotted", "github_owner": "o", "github_repo": ".github"},
+        ).json()["github_repo"]
+        == ".github"
+    )
+
+
 def test_existing_project_can_add_and_clear_github_configuration(client):
     project = create_project(client, name="Existing v0.1 project")
 
