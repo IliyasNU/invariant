@@ -34,6 +34,7 @@ from app.config import Settings
 from app.database import SessionLocal
 from app.feedback import claim_feedback, hold, publish_feedback, wants_feedback
 from app.github import GitHubAPIError, GitHubClient
+from app.logs import configure_logging, run_context
 from app.models import AnalysisRun
 
 logger = logging.getLogger("app.worker")
@@ -75,6 +76,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _ms(began: float) -> int:
+    return round((time.monotonic() - began) * 1000)
+
+
 def recover_expired(db: Session, policy: Policy, now: datetime) -> int:
     """Queue again, or fail, the runs whose worker's lease has expired."""
     expired = db.scalars(
@@ -84,13 +89,21 @@ def recover_expired(db: Session, policy: Policy, now: datetime) -> int:
     ).all()
     for run in expired:
         message = "The worker running the analysis stopped before it finished"
-        if run.attempts >= policy.max_attempts:
-            fail_run(run, "worker_lost", message)
-        else:
+        holder, requeued = run.locked_by, run.attempts < policy.max_attempts
+        if requeued:
             run.status = "queued"
             run.error_code, run.error_message = "worker_lost", message
             run.next_attempt_at = now
             run.lease_expires_at = run.locked_by = None
+        else:
+            fail_run(run, "worker_lost", message)
+        logger.warning(
+            "Run %s lost its worker %s; %s",
+            run.id,
+            holder,
+            "queued again" if requeued else "failed",
+            extra={"event": "run_worker_lost", "run_id": run.id, "requeued": requeued},
+        )
     db.commit()
     return len(expired)
 
@@ -144,21 +157,43 @@ def process(
     """Execute a claimed run and record how it ended."""
     # A rollback forgets what the attempt changed, its start time included.
     started_at = _now()
-    deadline = time.monotonic() + policy.job_time.total_seconds()
+    began = time.monotonic()
+    deadline = began + policy.job_time.total_seconds()
+    logger.info(
+        "Run %s claimed, attempt %s",
+        run.id,
+        run.attempts,
+        extra={"event": "run_claimed", "attempt": run.attempts, "worker": worker_id},
+    )
     try:
         with github_factory() as github:
             execute_github_analysis(db, run, github, deadline=deadline)
             if not _still_ours(db, run, worker_id):
                 db.rollback()
-                logger.warning("Run %s was taken over; its result is dropped", run.id)
+                logger.warning(
+                    "Run %s was taken over; its result is dropped",
+                    run.id,
+                    extra={"event": "run_result_dropped"},
+                )
                 return
             run.lease_expires_at = None
+            outcome = run.outcome
             publish = wants_feedback(run, github)
             if publish:
                 # Due with the result, so a crash before publishing only delays it.
                 run.feedback_status = "pending"
                 hold(run, policy.lease.total_seconds(), _now())
             db.commit()
+            logger.info(
+                "Run %s completed: %s",
+                run.id,
+                outcome,
+                extra={
+                    "event": "run_completed",
+                    "outcome": outcome,
+                    "duration_ms": _ms(began),
+                },
+            )
             if publish:
                 _publish(db, run, github, policy)
     except GitHubAPIError as exc:
@@ -173,14 +208,33 @@ def process(
             run.error_code, run.error_message = exc.code, exc.message
             run.next_attempt_at = _now() + delay
             run.lease_expires_at = run.locked_by = None
-            logger.info("Run %s: %s, retrying in %s", run.id, exc.code, delay)
+            logger.info(
+                "Run %s: %s, retrying in %s",
+                run.id,
+                exc.code,
+                delay,
+                extra={
+                    "event": "run_retry_scheduled",
+                    "error_code": exc.code,
+                    "delay_seconds": delay.total_seconds(),
+                },
+            )
         else:
             fail_run(run, exc.code, exc.message)
-            logger.info("Run %s failed: %s", run.id, exc.code)
+            logger.warning(
+                "Run %s failed: %s",
+                run.id,
+                exc.code,
+                extra={"event": "run_failed", "error_code": exc.code},
+            )
         db.commit()
     except Exception:
         db.rollback()
-        logger.exception("Run %s failed unexpectedly", run.id)
+        logger.exception(
+            "Run %s failed unexpectedly",
+            run.id,
+            extra={"event": "run_failed", "error_code": "internal_error"},
+        )
         if _still_ours(db, run, worker_id):
             run.started_at = started_at
             fail_run(run, "internal_error", "The analysis failed unexpectedly")
@@ -227,12 +281,13 @@ def run_worker(
             recover_expired(db, policy, now)
             run = claim(db, worker_id, policy, now)
             if run is not None:
-                process(db, run, github_factory, policy, worker_id)
+                with run_context(run.id):
+                    process(db, run, github_factory, policy, worker_id)
                 processed += 1
                 continue
             feedback = claim_feedback(db, policy.lease.total_seconds(), now)
             if feedback is not None:
-                with github_factory() as github:
+                with run_context(feedback.id), github_factory() as github:
                     _publish(db, feedback, github, policy)
                 continue
         if until_idle:
@@ -242,9 +297,8 @@ def run_worker(
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
+    settings = Settings()
+    configure_logging(settings.log_level, settings.log_format, settings.secrets())
     stop = threading.Event()
 
     def shut_down(signum: int, _frame: object) -> None:

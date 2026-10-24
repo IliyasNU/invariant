@@ -10,6 +10,8 @@ x-environment: &environment
   GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
   # Passed on only when set, in .env or the shell; otherwise the defaults hold.
   INVARIANT_PUBLIC_URL:
+  INVARIANT_LOG_FORMAT:
+  INVARIANT_LOG_LEVEL:
   WORKER_MAX_ATTEMPTS:
   WORKER_LEASE_SECONDS:
   WORKER_JOB_SECONDS:
@@ -37,8 +39,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    command:
-      ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.server"]
 
   # Runs the queued GitHub analyses. On SIGTERM it finishes the current run.
   worker:

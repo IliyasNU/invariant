@@ -187,9 +187,9 @@ def test_invalid_files_are_rejected_with_locations(client):
 
     for response in (syntax, field):
         assert response.status_code == 422
-        assert response.json()["detail"]["code"] == "invalid_config"
-    assert syntax.json()["detail"]["problems"][0]["location"].startswith("line 2")
-    assert field.json()["detail"]["problems"] == [
+        assert response.json()["error"]["code"] == "invalid_config"
+    assert syntax.json()["error"]["fields"][0]["location"].startswith("line 2")
+    assert field.json()["error"]["fields"] == [
         {
             "location": "rules[0].max_lines",
             "message": "Input should be greater than or equal to 1",
@@ -208,7 +208,7 @@ def test_import_rejects_a_name_another_rule_keeps(client):
     response = import_config(client, project["id"], CONFIG)
 
     assert response.status_code == 422
-    [problem] = response.json()["detail"]["problems"]
+    [problem] = response.json()["error"]["fields"]
     assert problem["location"] == "rules[0].name"
     assert "already used by rule 'kept'" in problem["message"]
     assert [rule["key"] for rule in rules(client, project["id"])] == ["kept"]

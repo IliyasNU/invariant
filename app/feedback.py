@@ -200,32 +200,71 @@ def publish_feedback(
             run.feedback_status = "stale"
             run.feedback_next_attempt_at = None
             db.commit()
+            logger.info(
+                "The comment for run %s is stale; not published",
+                run.id,
+                extra={
+                    "event": "feedback_stale",
+                    "reason": "newer_run" if newer else "head_moved",
+                },
+            )
             return
         body = feedback_body(run, public_url)
-        if record.comment_id is None or not github.update_comment(
+        created = record.comment_id is None or not github.update_comment(
             owner, repo, record.comment_id, body
-        ):
+        )
+        if created:
             record.comment_id = github.create_comment(
                 owner, repo, run.pull_number, body
             )
         record.analysis_run_id, record.head_sha = run.id, run.head_sha
+        comment_id = record.comment_id
         run.feedback_status = "posted"
         run.feedback_error = run.feedback_next_attempt_at = None
         db.commit()
+        logger.info(
+            "The comment for run %s is posted",
+            run.id,
+            extra={
+                "event": "feedback_posted",
+                "comment_id": comment_id,
+                "new_comment": created,
+            },
+        )
     except GitHubAPIError as exc:
         db.rollback()
         run.feedback_error = exc.code
         if exc.transient and run.feedback_attempts < max_attempts:
-            run.feedback_next_attempt_at = _now() + retry_delay(
-                run.feedback_attempts, exc.retry_after
+            delay = retry_delay(run.feedback_attempts, exc.retry_after)
+            run.feedback_next_attempt_at = _now() + delay
+            logger.info(
+                "The comment for run %s: %s, retrying in %s",
+                run.id,
+                exc.code,
+                delay,
+                extra={
+                    "event": "feedback_retry_scheduled",
+                    "error_code": exc.code,
+                    "delay_seconds": delay.total_seconds(),
+                },
             )
         else:
             run.feedback_status = "failed"
             run.feedback_next_attempt_at = None
+            logger.warning(
+                "The comment for run %s failed: %s",
+                run.id,
+                exc.code,
+                extra={"event": "feedback_failed", "error_code": exc.code},
+            )
         db.commit()
     except Exception:
         db.rollback()
-        logger.exception("The comment for run %s failed unexpectedly", run.id)
+        logger.exception(
+            "The comment for run %s failed unexpectedly",
+            run.id,
+            extra={"event": "feedback_failed", "error_code": "internal_error"},
+        )
         run.feedback_status, run.feedback_error = "failed", "internal_error"
         run.feedback_next_attempt_at = None
         db.commit()

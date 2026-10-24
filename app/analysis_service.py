@@ -10,6 +10,8 @@ written in one transaction.
 
 import hashlib
 import json
+import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +26,8 @@ from invariant import __version__
 from invariant.config import SCHEMA_VERSION, InvariantConfig
 from invariant.engine import Unreadable
 from invariant.result import RESULT_SCHEMA_VERSION, AnalysisResult, Diagnostic
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectGitHubNotConfigured(Exception):
@@ -141,7 +145,20 @@ def persist_analysis(
     _complete(
         run, project, rules, evaluate(files, rules, project), started_at=started_at
     )
-    return _save(db, run)
+    _save(db, run)
+    logger.info(
+        "Run %s completed: %s",
+        run.id,
+        run.outcome,
+        extra={
+            "event": "run_completed",
+            "run_id": run.id,
+            "source": source,
+            "outcome": run.outcome,
+            "duration_ms": run.duration_ms,
+        },
+    )
+    return run
 
 
 def enqueue_github_analysis(
@@ -171,7 +188,20 @@ def enqueue_github_analysis(
         rules_evaluated=0,
         violation_count=0,
     )
-    return _save(db, run)
+    _save(db, run)
+    logger.info(
+        "Run %s queued for pull request %s",
+        run.id,
+        pull_number,
+        extra={
+            "event": "run_queued",
+            "run_id": run.id,
+            "source": source,
+            "pull_number": pull_number,
+            "github_delivery_id": github_delivery_id,
+        },
+    )
+    return run
 
 
 def execute_github_analysis(
@@ -199,11 +229,25 @@ def execute_github_analysis(
         )
     rules = _project_rules(db, project)
     assert run.pull_number is not None
+    began = time.monotonic()
     pull_request = github.get_pull_request(
         project.github_owner, project.github_repo, run.pull_number
     )
     changed = github.get_changed_python_files(
         project.github_owner, project.github_repo, pull_request, deadline=deadline
+    )
+    logger.info(
+        "Pull request %s fetched at %s",
+        run.pull_number,
+        pull_request.head_sha[:12],
+        extra={
+            "event": "pull_request_fetched",
+            "head_sha": pull_request.head_sha,
+            "files": len(changed.files),
+            "skipped": len(changed.skipped),
+            "truncated": changed.truncated,
+            "duration_ms": round((time.monotonic() - began) * 1000),
+        },
     )
     errors = []
     if changed.truncated:
@@ -218,6 +262,7 @@ def execute_github_analysis(
                 ),
             )
         )
+    began = time.monotonic()
     result = evaluate(
         changed.files,
         rules,
@@ -225,6 +270,16 @@ def execute_github_analysis(
         unreadable=[Unreadable(item.path, item.reason) for item in changed.skipped],
         ignored=changed.ignored,
         errors=errors,
+    )
+    logger.info(
+        "Analysis finished: %s",
+        result.outcome.value,
+        extra={
+            "event": "analysis_finished",
+            "outcome": result.outcome.value,
+            "diagnostics": len(result.diagnostics),
+            "duration_ms": round((time.monotonic() - began) * 1000),
+        },
     )
     _complete(
         run, project, rules, result, started_at=started_at, pull_request=pull_request

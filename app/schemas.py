@@ -533,3 +533,23 @@ class WebhookResponse(APIModel):
     # The outcome of a duplicate delivery's run, once it has one.
     outcome: RunOutcome | None = None
     detail: str | None = None
+
+
+class ErrorField(APIModel):
+    # Where the problem is, such as body.name or a line of a configuration.
+    location: str
+    message: str
+    type: str | None = None
+
+
+class ErrorBody(APIModel):
+    code: str
+    message: str
+    request_id: str | None
+    fields: list[ErrorField] | None = None
+
+
+class ErrorResponse(APIModel):
+    """What every error response holds."""
+
+    error: ErrorBody
