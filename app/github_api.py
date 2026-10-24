@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.analysis_service import enqueue_github_analysis
+from app.api import ID
 from app.config import Settings
 from app.database import get_db
 from app.errors import APIError
@@ -50,7 +51,7 @@ def _project_or_404(project_id: int, db: Session) -> Project:
     dependencies=[APIKey, Depends(rate_limited)],
 )
 def analyze_github_project(
-    project_id: int, payload: GitHubAnalysisRequest, db: DatabaseSession
+    project_id: ID, payload: GitHubAnalysisRequest, db: DatabaseSession
 ) -> AnalysisRun:
     """Queue an analysis of the pull request for the worker.
 
