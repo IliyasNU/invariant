@@ -48,6 +48,9 @@ def _reject_control_characters(
 def _normalize_github_name(value: str | None) -> str | None:
     if value is not None and not GITHUB_NAME.fullmatch(value):
         raise ValueError("must contain only letters, numbers, '.', '_', or '-'")
+    # Path segments that a URL resolves away: they would name another endpoint.
+    if value in {".", ".."}:
+        raise ValueError("must not be '.' or '..'")
     return value.lower() if value is not None else None
 
 
