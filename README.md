@@ -382,7 +382,6 @@ incomplete, not-applicable and failed GitHub analyses are stored instead of
 refused; a project without applicable rules no longer passes.
 
 ### Manual GitHub pull request analysis
-### Manual GitHub pull request analysis
 
 The project must have GitHub owner/repository configuration:
 
@@ -414,7 +413,6 @@ credentials or upstream payloads:
 {"detail": {"code": "github_rate_limited", "message": "GitHub API rate limit exceeded", "analysis_run_id": 43}}
 ```
 
-### Analysis history
 ### Analysis history
 
 ```bash
