@@ -33,9 +33,11 @@ from app.schemas import (
     RunStatus,
     SettingChange,
 )
+from app.security import APIKey
 from invariant.config import RULES, ConfigError, RuleConfig, parse_config
 
-router = APIRouter()
+# The whole business API requires the operator's key.
+router = APIRouter(dependencies=[APIKey])
 DatabaseSession = Annotated[Session, Depends(get_db)]
 RULE_CONFLICT = (
     "rule_conflict",

@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 os.environ["DATABASE_URL"] = os.environ.get(
     "INVARIANT_TEST_DATABASE_URL", "sqlite+pysqlite:///:memory:"
 )
+# The test client presents this key, as every client of the API must.
+os.environ["INVARIANT_API_KEY"] = API_KEY = "test-api-key-" + "k" * 32
 
 from app.database import engine
 from app.main import app
@@ -24,5 +26,5 @@ def clean_database():
 
 @pytest.fixture
 def client() -> TestClient:
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"Authorization": f"Bearer {API_KEY}"}) as test_client:
         yield test_client
