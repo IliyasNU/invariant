@@ -224,6 +224,10 @@ curl http://127.0.0.1:8000/projects
 curl http://127.0.0.1:8000/projects/1
 ```
 
+Lists are paginated: `GET /projects` and `GET /projects/{id}/rules` return
+100 items by default (`limit` 1–500, `offset` ≥ 0), and every list response
+carries the total number of matching items in an `X-Total-Count` header.
+
 `PATCH /projects/{id}` changes only the fields it sends: `name`,
 `description`, the GitHub pair (set both, or clear both with null),
 `source_roots`, `exclude_paths` and `fail_on`. Associate an existing v0.1
@@ -420,13 +424,39 @@ credentials or upstream payloads:
 ```bash
 curl http://127.0.0.1:8000/projects/1/analysis-runs
 curl "http://127.0.0.1:8000/projects/1/analysis-runs?limit=20&offset=20"
+curl "http://127.0.0.1:8000/projects/1/analysis-runs?outcome=fail&source=github_webhook"
 curl http://127.0.0.1:8000/analysis-runs/42
+curl "http://127.0.0.1:8000/analysis-runs/42/diagnostics?kind=violation&severity=error&limit=50"
+curl http://127.0.0.1:8000/projects/1/stats
 ```
 
 The project endpoint returns newest-first summaries, 50 per page by default
-(`limit` 1–200, `offset` ≥ 0). The global run endpoint
-returns the summary plus the configuration snapshot and the diagnostics.
-Missing projects or runs return 404.
+(`limit` 1–200, `offset` ≥ 0), filtered by any of `status`, `outcome`,
+`source` and `pull_number`. The global run endpoint returns the summary plus
+the configuration snapshot and every diagnostic. For large runs,
+`GET /analysis-runs/{id}/diagnostics` pages through them in the engine's order
+(path, line, column, rule key), 100 per page by default (`limit` 1–500),
+filtered by any of `kind`, `severity`, `code`, `rule_key` and `path`. These
+lists also carry `X-Total-Count`. Missing projects or runs return 404.
+
+`GET /projects/{id}/stats` summarizes all of a project's runs:
+
+```json
+{
+  "project_id": 1,
+  "runs": 6,
+  "by_status": {"queued": 0, "running": 0, "completed": 5, "failed": 1},
+  "by_outcome": {"pass": 2, "fail": 1, "incomplete": 1, "not_applicable": 1},
+  "pass_rate": {"passed": 2, "decided": 3, "without_verdict": 3, "rate": 0.6667},
+  "diagnostics": {"errors": 1, "warnings": 1, "analysis_errors": 1},
+  "duration": {"runs": 5, "average_ms": 2.4, "max_ms": 4},
+  "latest": ["the ten newest run summaries"]
+}
+```
+
+The pass rate is `passed / decided` over the runs with a verdict, pass or
+fail. Incomplete, not-applicable, failed and unfinished runs have none, so
+they are counted in `without_verdict` instead of silently lowering the rate.
 
 `GET /analysis-runs/{id}/result` exports a run in the engine's own result
 format (`schema_version` 1), the document `invariant check --format json`
