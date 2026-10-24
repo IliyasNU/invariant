@@ -14,7 +14,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# The analysis engine is the project's own package.
+# The analysis engine is the project's own package; its metadata includes
+# the README, without which the package does not build.
+COPY README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
