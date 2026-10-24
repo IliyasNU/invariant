@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     worker_job_seconds: int = Field(default=300, ge=10)
     # The first retry waits this long, each next one twice as long.
     worker_retry_seconds: float = Field(default=30.0, gt=0)
+    # Runs that finished longer ago are deleted by the worker; 0 keeps them.
+    retention_days: int = Field(
+        default=0, ge=0, validation_alias="INVARIANT_RETENTION_DAYS"
+    )
     # Touched by the worker as it goes, for its health check; empty for none.
     worker_heartbeat_file: str = Field(
         default="/tmp/invariant-worker-heartbeat",

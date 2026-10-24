@@ -172,6 +172,7 @@ by default, avoiding a common conflict with host PostgreSQL installations. Set
 | `INVARIANT_AUTH_FAILURES_PER_MINUTE` | `30` | Requests without a valid key per client and minute; `0` is no limit |
 | `INVARIANT_MAX_CONCURRENT_ANALYSES` | `2` | Direct analyses that run at once |
 | `INVARIANT_WORKER_HEARTBEAT` | `/tmp/invariant-worker-heartbeat` | File the worker touches, for its health check; empty for none |
+| `INVARIANT_RETENTION_DAYS` | `0` | Days of finished runs the worker keeps; `0` keeps them all |
 | `INVARIANT_HOST` | `127.0.0.1` | Where `python -m app.server` listens (`0.0.0.0` in the image) |
 | `INVARIANT_PORT` | `8000` | Its port |
 | `INVARIANT_LOG_FORMAT` | `json` | `json`: one object per line; `text`: for a terminal |
@@ -194,10 +195,21 @@ docker compose up --build
 
 The `migrate` service waits for a healthy database and runs
 `alembic upgrade head` once; the `app` (FastAPI) and `worker` services start
-only after it succeeded. All of them use one image, run as an unprivileged
-`invariant` user, and reach PostgreSQL through Compose service DNS at
-`db:5432`. On `docker compose stop` the worker finishes the analysis it is
-running (within two minutes) before it exits.
+only after it succeeded, so replicas never race to change the schema, and
+the application never creates tables itself. All of them use one image, run
+as an unprivileged `invariant` user, and reach PostgreSQL through Compose
+service DNS at `db:5432`. `docker compose ps` shows the `app` and the
+`worker` healthy once they pass their [health checks](#health-checks). On
+`docker compose stop` the worker finishes the analysis it is running (within
+two minutes) and exits 0; queued runs wait in the database for the next
+worker.
+
+CI's `docker` job checks all of this on every change with
+`scripts/compose_smoke.py`: it builds the image, starts the stack, sends a
+signed webhook that the worker analyzes against a stand-in GitHub and
+comments on, keeps a delivery queued through a stopped worker and a restart,
+takes the stack down and up again, and restores a backup into a new
+database.
 
 Both published ports bind to `127.0.0.1` only: the database uses local
 example credentials, and the API is meant to be published through a
@@ -241,6 +253,54 @@ docker compose down
 
 `docker compose down` preserves the named PostgreSQL volume. Do not add `-v` if
 you want to keep local data.
+
+## Backup and restore
+
+The database holds everything that must survive: projects, rules, the run
+history with its diagnostics, and the pull request comment records. Secrets
+are not in it; they stay in the environment. Back it up with `pg_dump`:
+
+```bash
+docker compose exec -T db pg_dump --username invariant --format custom invariant > invariant.dump
+```
+
+To restore into a new, empty database, for example after losing the volume:
+
+```bash
+docker compose down --volumes          # only if the old data is to go
+docker compose up -d db
+docker compose exec -T db pg_restore --username invariant --dbname invariant --no-owner < invariant.dump
+docker compose up -d                   # migrate brings an older backup up to date
+```
+
+CI restores a backup this way on every change and checks that the API
+serves the same projects, rules and history.
+
+## Retention
+
+History is kept for ever by default. `INVARIANT_RETENTION_DAYS=N` makes the
+worker delete, once an hour, the runs that finished more than `N` days ago,
+with their diagnostics. Queued and running runs, the jobs still to do, are
+never deleted, nor a run whose pull request comment is still to be posted;
+projects and rules are not touched. The same can be run by hand or from a
+scheduler:
+
+```bash
+uv run python -m app.retention --days 90 --dry-run   # count only
+uv run python -m app.retention --days 90
+docker compose exec worker python -m app.retention --days 90
+```
+
+## Supported versions
+
+| Component | Versions | Checked by |
+| --- | --- | --- |
+| Python | 3.14 (`requires-python = ">=3.14"`, `.python-version`) | every CI job; the image is `python:3.14-slim` |
+| PostgreSQL | 16, 17 and 18 | the CI test job runs the migrations and the whole suite on each; Compose uses 18 |
+| Docker | Docker Engine with Compose v2 | CI's `docker` job |
+| Dependencies | locked in `uv.lock` | `uv sync --locked` in CI, `uv sync --frozen` in the image |
+
+SQLite runs the test suite fast, but is not supported for a deployment.
 
 ## Migrations
 
@@ -765,11 +825,13 @@ uv run python -m compileall -q app migrations src tests
 uv run invariant check .
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs ruff, applies and checks the
-migrations against PostgreSQL 18, and runs the tests on SQLite and PostgreSQL
-for every pull request and every push to `main`. Its `cli` job builds the
-wheel, installs it into a clean environment and runs the command-line tests
-and the GitHub Actions example against that installation, then checks this
+GitHub Actions (`.github/workflows/ci.yml`) runs ruff, applies, checks and
+rolls back the migrations, and runs the tests on SQLite and on PostgreSQL 16,
+17 and 18, for every pull request and every push to `main`. Its `docker` job
+builds the image and smoke-tests the Compose stack (see
+[Docker full stack](#docker-full-stack)). Its `cli` job builds the wheel,
+installs it into a clean environment and runs the command-line tests and the
+GitHub Actions example against that installation, then checks this
 repository with its own `invariant.toml`.
 
 Real local verification:
@@ -801,8 +863,8 @@ uv run python -m app.server
   new comment. If GitHub times out after creating a comment, the retry can
   create a second one.
 - History keeps results, diagnostics, counts, configuration snapshots and
-  commit IDs, but never source code. There is no retention policy yet: runs
-  are kept until their project is deleted.
+  commit IDs, but never source code, for as long as
+  [retention](#retention) allows.
 - A worker's lease must outlast an analysis: a run that takes longer than
   `WORKER_LEASE_SECONDS` is taken over and analyzed again, and only the last
   holder's result is recorded.
@@ -817,8 +879,6 @@ uv run python -m app.server
   restarting the API with the new key.
 - Repository-wide unchanged files are not analyzed; v0.2 evaluates changed PR
   files only.
-- CI checks the code, the migrations and the tests on SQLite and PostgreSQL,
-  but does not build or smoke-test the Docker image yet.
 
 ## Roadmap
 
