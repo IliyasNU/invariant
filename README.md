@@ -7,9 +7,81 @@ Invariant returns deterministic, machine-readable violations and keeps an audit
 history of every completed analysis. The `invariant` command runs the same
 checks offline, on a developer machine or in CI.
 
-Version 0.2 is intentionally focused: it analyzes Python imports with the
-standard-library AST. It does **not** claim semantic or AI-based architecture
-understanding, and the human developer remains the final authority.
+Version 1.0 checks Python code with four deterministic rule types, for
+forbidden imports, forbidden calls, relative imports and file length, read
+with the standard-library AST and never run. It does **not** claim semantic
+or AI-based architecture understanding, and the human developer remains the
+final authority. What changed since v0.2 is in
+[`CHANGELOG.md`](CHANGELOG.md), and how to upgrade in
+[`docs/upgrade-from-v0.2.md`](docs/upgrade-from-v0.2.md).
+
+## Quick start
+
+On a developer machine or in CI, without the service:
+
+```bash
+pip install "invariant @ git+https://github.com/IliyasNU/invariant@main"
+invariant init     # a starter invariant.toml for the project
+invariant check .
+```
+
+The service, with PostgreSQL, the API and the worker, in Docker:
+
+```bash
+git clone https://github.com/IliyasNU/invariant && cd invariant
+cp .env.example .env
+# Set INVARIANT_API_KEY in .env to a random value, such as the output of:
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+docker compose up --build -d
+docker compose ps                      # app and worker become healthy
+curl http://127.0.0.1:8000/ready       # {"status":"ready"}
+```
+
+## Demo
+
+`examples/demo` is a small project with a rule of each type, and it passes
+its own check:
+
+```console
+$ invariant check examples/demo
+PASS
+Files: 5 analyzed, 0 not analyzed, 0 excluded, 1 ignored (6 in total)
+Rules: 4 of 4 enabled, applied 14 times
+Configuration: examples/demo/invariant.toml
+```
+
+Let the domain import the infrastructure, and the check fails, exit code 1:
+
+```console
+$ echo "from shop.infrastructure import db" >> examples/demo/src/shop/domain/order.py
+$ invariant check examples/demo
+src/shop/domain/order.py:11:1: error [domain-isolation] shop.domain.order must not import shop.infrastructure (matched shop.infrastructure)
+
+FAIL: 1 violation at or above error
+Files: 5 analyzed, 0 not analyzed, 0 excluded, 1 ignored (6 in total)
+Rules: 4 of 4 enabled, applied 14 times
+Configuration: examples/demo/invariant.toml
+```
+
+The service gives the same answer. With the stack of the quick start, import
+the demo's configuration into a project and submit the same import:
+
+```bash
+AUTH="Authorization: Bearer $INVARIANT_API_KEY"
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects \
+  -H "Content-Type: application/json" -d '{"name": "Shop"}'
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/config/import \
+  -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json; print(json.dumps({"content": open("examples/demo/invariant.toml").read()}))')"
+curl -H "$AUTH" -X POST http://127.0.0.1:8000/projects/1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"files": [{"path": "src/shop/domain/order.py", "content": "from shop.infrastructure import db\n"}]}'
+```
+
+The run's `outcome` is `fail`, with the same `domain-isolation` diagnostic.
+The command line, the API and pull request analysis share one engine; CI
+checks that they report the same diagnostics for the same input
+(`tests/test_parity.py`).
 
 ## Architecture
 
@@ -99,6 +171,41 @@ Example rule:
 `app/domain/payment.py` produces a structured violation with the rule, path,
 line, column, imported module, and explanation. Results are sorted by path,
 line, column and rule key, so repeated analysis is deterministic.
+
+A configuration with a rule of each type, the demo's `invariant.toml`, which
+the command line reads and a project can import:
+
+```toml
+version = 1
+
+[project]
+source_roots = ["src"]
+exclude_paths = ["tests/"]
+
+[[rules]]
+key = "domain-isolation"
+name = "The domain does not depend on infrastructure"
+rule_type = "forbidden_import"
+source_pattern = "shop.domain.*"
+forbidden_imports = ["shop.infrastructure"]
+
+[[rules]]
+key = "no-shell"
+name = "The domain does not run commands"
+rule_type = "forbidden_call"
+source_pattern = "shop.domain.*"
+forbidden_calls = ["os.system", "subprocess", "builtins.eval"]
+
+[[rules]]
+key = "absolute-imports"
+rule_type = "no_relative_import"
+severity = "warning"
+
+[[rules]]
+key = "small-files"
+rule_type = "max_file_lines"
+max_lines = 300
+```
 
 ## Command line
 
@@ -449,7 +556,7 @@ Direct analysis records a run and returns it. Abridged:
   "started_at": "2026-10-24T08:00:00.035517Z",
   "finished_at": "2026-10-24T08:00:00.037113Z",
   "duration_ms": 2,
-  "engine_version": "0.3.0.dev0",
+  "engine_version": "1.0.0",
   "config_hash": "854dd572b1b82b530ac58bcead403f192029ad166ca0cfaaf8d941fe7911f97a",
   "files_analyzed": 1,
   "rules_evaluated": 1,
@@ -505,7 +612,7 @@ and `violation_count` fields are kept for v0.2 clients. `config` is the
 project settings and rules as they were at analysis time, so editing or
 deleting a rule never rewrites an earlier result.
 
-Changes from v0.2, starting with version 0.3.0.dev0: `passed` can be `null`; a file that
+Changes from v0.2: `passed` can be `null`; a file that
 cannot be parsed makes the run `incomplete` instead of a `422 invalid_python`;
 incomplete, not-applicable and failed GitHub analyses are stored instead of
 refused; a project without applicable rules no longer passes.
@@ -715,7 +822,7 @@ what static analysis cannot see:
 - `app/domain/orders.py:3` error: `app.domain.orders must not import app.infrastructure.db`
 
 Checked 4 changed Python files against 2 rules; 1 excluded, 0 not analyzed. Invariant reads the code without running it, so dynamic imports and calls made through variables are not seen.
-Details: [run 42](https://invariant.example.com/analysis-runs/42) · Invariant 0.3.0.dev0
+Details: [run 42](https://invariant.example.com/analysis-runs/42) · Invariant 1.0.0
 ```
 
 An incomplete run says `INCOMPLETE` and that there is no verdict; a run that
@@ -844,6 +951,24 @@ uv run alembic check
 uv run python -m app.server
 ```
 
+## Troubleshooting
+
+| Symptom | Cause and remedy |
+| --- | --- |
+| The API stops at start with `Set INVARIANT_API_KEY ...` | No key and no local-only mode: set `INVARIANT_API_KEY` (32 characters or more), or `INVARIANT_LOCAL_ONLY=true` for an API only this machine can reach. |
+| `401 unauthorized` | The request lacks `Authorization: Bearer <key>`, or the key is not the API's. A key in the URL is ignored. |
+| `429 too_many_failed_keys` or `too_many_requests` | Too many requests from this address; wait for `Retry-After`, or raise the [limit](#limits). |
+| `/ready` answers `503 not_migrated` | The schema is not this version's: run `uv run alembic upgrade head`, or `docker compose up migrate`. |
+| `/ready` answers `503 database_unavailable` | PostgreSQL cannot be reached: check `DATABASE_URL` or `POSTGRES_*`, and `docker compose ps db`. |
+| GitHub runs stay `queued` | No worker is running: `docker compose ps worker` and `docker compose logs worker`. A run waiting to be retried shows `next_attempt_at` and the last `error`. |
+| A GitHub run `failed` with `github_not_found` or `github_authentication_failed` | The token cannot read the repository, or the project's `github_owner` or `github_repo` is wrong. |
+| A run is `incomplete` | A file could not be analyzed: its `error` diagnostic gives the file and the reason (`syntax_error`, `too_large`, `undecodable`, `limit_exceeded`, `file_list_truncated`, ...). |
+| A run is `not_applicable` | No enabled rule applies to the files: check the rules' `source_pattern`, the source roots and the exclusions. |
+| No pull request comment | Comments need `GITHUB_POST_PR_COMMENT=true` and a token allowed to write pull requests; the run's `feedback` says `pending`, `stale` or `failed`, with the error. |
+| The webhook answers `401 invalid_github_signature` | The secret configured in GitHub is not `GITHUB_WEBHOOK_SECRET`. |
+| `invariant check` exits 2 | The configuration is unusable (the message names the problem), a file could not be analyzed, or `--strict` met a check with nothing to check; `--format json` gives the details. |
+| Following a request or a run in the logs | Every line carries its `request_id`, and the lines of a GitHub run its `run_id` ([Logs](#logs)). |
+
 ## Security and limitations
 
 - No GitHub token or webhook secret is stored in PostgreSQL.
@@ -877,20 +1002,21 @@ uv run python -m app.server
 - One API key protects the API: there are no users, organizations or
   roles, and anyone with the key can do everything. Rotating it means
   restarting the API with the new key.
-- Repository-wide unchanged files are not analyzed; v0.2 evaluates changed PR
-  files only.
+- A pull request analysis checks the changed files only; `invariant check`
+  checks a whole tree.
 
 ## Roadmap
 
-The v1.0 requirements and what this branch already covers, with the tests
-that prove it, are tracked in
-[`docs/v1.0-traceability.md`](docs/v1.0-traceability.md).
+Every v1.0 requirement, with the code and the tests that prove it, is in
+[`docs/v1.0-traceability.md`](docs/v1.0-traceability.md), and the release
+checklist with its evidence in
+[`docs/release-checklist.md`](docs/release-checklist.md).
 
-Potential v0.3+ work belongs here rather than in the v0.2 implementation:
+Beyond 1.0:
 
 - GitHub App authentication and GitHub Checks.
 - Semantic / LLM-assisted architecture rules with human review.
 - Repository-wide dependency graphs and additional deterministic rule types.
 - Multi-language analysis.
-- Authentication, organizations, and authorization.
-- Web UI and production deployment guidance.
+- Users, organizations and roles; 1.0 has one API key.
+- A web UI.
