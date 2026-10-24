@@ -370,6 +370,37 @@ class AnalysisRunResponse(AnalysisRunSummaryResponse):
     violations: list[PersistedViolationResponse]
 
 
+class PassRateResponse(APIModel):
+    """``rate = passed / decided``, over the runs that have a verdict."""
+
+    passed: int
+    # Runs whose outcome is pass or fail.
+    decided: int
+    # Incomplete, not-applicable, failed and unfinished runs: not in the rate.
+    without_verdict: int
+    rate: float | None
+
+
+class DurationResponse(APIModel):
+    # Runs with a recorded duration; runs recorded by v0.2 have none.
+    runs: int
+    average_ms: float | None
+    max_ms: int | None
+
+
+class ProjectStatsResponse(APIModel):
+    project_id: int
+    runs: int
+    by_status: dict[RunStatus, int]
+    by_outcome: dict[RunOutcome, int]
+    pass_rate: PassRateResponse
+    # Totals over every run of the project.
+    diagnostics: DiagnosticCountsResponse
+    duration: DurationResponse
+    # The ten newest runs, newest first.
+    latest: list[AnalysisRunSummaryResponse]
+
+
 class DiagnosticResponse(APIModel):
     kind: Literal["violation", "error"]
     code: str
