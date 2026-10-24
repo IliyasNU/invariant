@@ -67,11 +67,12 @@ class GitHubAPIError(Exception):
 
 def _retry_after(response: httpx.Response) -> float | None:
     """The wait GitHub asks for: Retry-After, or until X-RateLimit-Reset."""
+    # isdecimal, not isdigit: "²" is a digit that int() refuses.
     retry_after = response.headers.get("Retry-After", "")
-    if retry_after.isdigit():
+    if retry_after.isdecimal():
         return float(retry_after)
     reset = response.headers.get("X-RateLimit-Reset", "")
-    if reset.isdigit():
+    if reset.isdecimal():
         return max(0.0, int(reset) - time.time())
     return None
 

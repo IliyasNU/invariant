@@ -132,6 +132,29 @@ def test_the_backoff_doubles_and_honours_retry_after():
     assert policy.retry_delay(3, 10).seconds == 120  # never sooner than the backoff
     assert policy.retry_delay(10, None) == timedelta(minutes=5)
     assert policy.retry_delay(1, 86_400) == timedelta(minutes=5)
+    # Too long for a timedelta: capped, not an OverflowError.
+    assert policy.retry_delay(1, 1e15) == timedelta(minutes=5)
+
+
+def test_a_retry_after_too_long_for_a_timedelta_does_not_stop_the_worker():
+    # A Retry-After past timedelta's range raised OverflowError out of the
+    # worker's error handler, which stopped the worker with the run held.
+    [run_id] = queue_runs()
+    error = GitHubAPIError(
+        429,
+        "github_rate_limited",
+        "GitHub API rate limit exceeded",
+        transient=True,
+        retry_after=1e15,
+    )
+
+    before = datetime.now(UTC)
+    assert work(FakeGitHub(error), retry_max=timedelta(hours=1)) == 1
+
+    waiting = load(run_id)
+    assert (waiting.status, waiting.locked_by) == ("queued", None)
+    wait = waiting.next_attempt_at.replace(tzinfo=UTC) - before
+    assert timedelta(minutes=59) < wait <= timedelta(hours=1, seconds=5)
 
 
 def test_attempts_are_limited():

@@ -188,7 +188,13 @@ def test_a_comment_response_without_an_id_is_an_error():
 
 @pytest.mark.parametrize(
     ("headers", "retry_after"),
-    [({"Retry-After": "120"}, 120.0), ({}, None)],
+    [
+        ({"Retry-After": "120"}, 120.0),
+        ({}, None),
+        # str.isdigit() accepts it, float() does not: no wait, not a crash.
+        ({"Retry-After": "\u00b2".encode("latin-1")}, None),
+        ({"X-RateLimit-Reset": "\u00b9\u00b2".encode("latin-1")}, None),
+    ],
 )
 def test_rate_limits_are_transient_and_carry_retry_after(headers, retry_after):
     def handler(_request):

@@ -72,7 +72,9 @@ class Policy:
         """Twice as long after each attempt, but never before GitHub asked."""
         delay = self.retry_base * 2 ** (attempt - 1)
         if retry_after is not None:
-            delay = max(delay, timedelta(seconds=retry_after))
+            # Capped first: a longer wait may not fit in a timedelta at all.
+            longest = self.retry_max.total_seconds()
+            delay = max(delay, timedelta(seconds=min(retry_after, longest)))
         return min(delay, self.retry_max)
 
 
