@@ -487,6 +487,27 @@ def test_webhook_rejects_invalid_signature(client, github, monkeypatch):
     assert response.json()["error"]["code"] == "invalid_github_signature"
 
 
+def test_a_non_ascii_signature_is_invalid_not_a_server_error(
+    client, github, monkeypatch
+):
+    # Header values arrive as Latin-1; comparing such a str with
+    # hmac.compare_digest raised TypeError, and an unsigned request got a 500.
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    assert not verify_webhook_signature(b"{}", "sha256=\u00e9", WEBHOOK_SECRET)
+
+    response = client.post(
+        "/integrations/github/webhook",
+        content=b"{}",
+        headers={
+            "X-Hub-Signature-256": "sha256=\u00e9".encode("latin-1"),
+            "X-GitHub-Event": "pull_request",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_github_signature"
+
+
 def test_webhook_requires_configured_secret(client, github, monkeypatch):
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
 
