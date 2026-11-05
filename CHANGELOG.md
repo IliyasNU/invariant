@@ -4,6 +4,37 @@ All notable changes to Invariant. From 1.0.0 on, versions follow semantic
 versioning: a change that breaks the API, the command line, the configuration
 file or the result format comes only with a new major version.
 
+## 1.1.0 (2026-11-05)
+
+### Added
+
+- CLI `invariant check --format sarif` produces SARIF 2.1.0 for code-scanning
+  tools, with stable rule IDs, escaped relative paths and analysis errors as
+  invocation notifications. Existing exit codes are unchanged.
+- Rule lists accept combinable `enabled`, `severity` and `rule_type` filters.
+  Pagination and `X-Total-Count` describe the filtered result.
+
+### Fixed
+
+- Malformed non-ASCII webhook signatures return 401 rather than 500.
+- IDs, offsets and PR numbers outside PostgreSQL INTEGER bounds are rejected
+  before storage. GitHub owner/repository names cannot be `.` or `..`.
+- Malformed rate-limit headers and huge retry delays no longer stop workers.
+- Deleting a project during analysis or comment publication no longer stops
+  the worker. Queued runs keep their original repository after project
+  reconfiguration; feedback for a previous repository becomes stale.
+- API/worker runs store at most 1,000 rule violations, while retaining full
+  counts and the correct outcome. Analysis errors remain listed; CLI output
+  is unlimited. Diagnostics pagination covers the stored findings only.
+- GitHub file names containing literal backslashes are reported as invalid
+  paths rather than analyzed under a different name.
+- `forbidden_call` resolves enclosing `global` declarations and `nonlocal`
+  rebinding across intermediate function scopes correctly.
+- Test harnesses work on Windows with UTF-8 files and Git for Windows Bash.
+
+No schema migration or new runtime dependency is required beyond 1.0.0.
+For older installations see [the v0.2 upgrade guide](docs/upgrade-from-v0.2.md).
+
 ## 1.0.0 (2026-10-24)
 
 The first stable release. The same analysis now runs from the `invariant`

@@ -376,10 +376,11 @@ def test_duplicate_paths_are_a_caller_error():
 def test_analyzed_code_is_never_executed(tmp_path):
     created = tmp_path / "created"
     ran = tmp_path / "ran"
+    child = f"from pathlib import Path; Path({str(ran)!r}).touch()"
     content = (
         f"open({str(created)!r}, 'w').write('x')\n"
-        "import os, subprocess\n"
-        f"os.system('touch {ran}')\n"
+        "import subprocess\n"
+        f"subprocess.run([{sys.executable!r}, '-c', {child!r}], check=True)\n"
         "import app.infrastructure\n"
     )
 

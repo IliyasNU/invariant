@@ -20,6 +20,17 @@ COMMAND = [INSTALLED] if INSTALLED else [sys.executable, "-m", "invariant"]
 # The directory holding the ``invariant`` script, for running the example.
 SCRIPTS = Path(INSTALLED).parent if INSTALLED else Path(sys.executable).parent
 REPOSITORY = Path(__file__).resolve().parent.parent
+# Windows' system bash launches WSL, whose PATH cannot run this Windows venv.
+# Use the shell bundled with Git for Windows for the Actions example instead.
+BASH = shutil.which("bash")
+if os.name == "nt":
+    git_executable = shutil.which("git")
+    git_bash = (
+        Path(git_executable).parent.parent / "bin" / "bash.exe"
+        if git_executable
+        else None
+    )
+    BASH = str(git_bash) if git_bash and git_bash.is_file() else None
 
 CONFIG = """\
 version = 1
@@ -170,7 +181,7 @@ def _example_commands() -> dict[str, str]:
 
 
 @pytest.mark.skipif(
-    shutil.which("git") is None or shutil.which("bash") is None,
+    shutil.which("git") is None or BASH is None,
     reason="needs git and bash",
 )
 def test_the_github_actions_example_on_the_demo_project(tmp_path):
@@ -195,7 +206,7 @@ def test_the_github_actions_example_on_the_demo_project(tmp_path):
     def step(command: str, **variables: str) -> subprocess.CompletedProcess[str]:
         # The workflow's own command line, run by a shell as Actions runs it.
         return subprocess.run(
-            ["bash", "-c", command],
+            [BASH, "-c", command],
             cwd=demo,
             env={**environment, **variables},
             capture_output=True,

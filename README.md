@@ -7,7 +7,7 @@ Invariant returns deterministic, machine-readable violations and keeps an audit
 history of every completed analysis. The `invariant` command runs the same
 checks offline, on a developer machine or in CI.
 
-Version 1.0 checks Python code with four deterministic rule types, for
+Version 1.1 checks Python code with four deterministic rule types, for
 forbidden imports, forbidden calls, relative imports and file length, read
 with the standard-library AST and never run. It does **not** claim semantic
 or AI-based architecture understanding, and the human developer remains the
@@ -20,7 +20,8 @@ final authority. What changed since v0.2 is in
 On a developer machine or in CI, without the service:
 
 ```bash
-pip install "invariant @ git+https://github.com/IliyasNU/invariant@main"
+# Run from a checkout of this version (main does not yet contain the release).
+pip install .
 invariant init     # a starter invariant.toml for the project
 invariant check .
 ```
@@ -110,7 +111,7 @@ flowchart LR
   whether source files came from an HTTP body, GitHub, or a future client.
 - **`src/invariant`** is the analysis engine: configuration schema, source
   roots, rule types and results. The service runs it through `app/analysis.py`,
-  and the upcoming CLI will run the same code. Its configuration format and
+  and the CLI runs the same code. Its configuration format and
   semantics are described in [`docs/configuration.md`](docs/configuration.md).
 - The core analyzer never executes submitted code.
 
@@ -213,11 +214,12 @@ The `invariant` command checks a project without the API, a database, a token
 or a network connection:
 
 ```bash
-pip install "invariant @ git+https://github.com/IliyasNU/invariant@main"
+pip install .                                      # from this version's checkout
 invariant init                                     # write a starter invariant.toml
 invariant check .                                  # every Python file in the project
 invariant check . --base origin/main --head HEAD   # only what the branch changed
 invariant check . --format json
+invariant check . --format sarif > results.sarif   # for code-scanning tools
 ```
 
 It exits with `0` when no violation reaches the threshold, `1` for violations,
@@ -505,6 +507,16 @@ reachable only through its own project, so another project's rule ID returns
 Deleting a rule returns `204`; past violations keep the rule key and name they
 were recorded with, and their `rule_id` becomes null.
 
+Rule lists can combine `enabled`, `severity` and `rule_type` filters:
+
+```bash
+curl -H "$AUTH" 'http://127.0.0.1:8000/projects/1/rules?enabled=true&severity=error&rule_type=forbidden_import&limit=20'
+```
+
+`X-Total-Count` counts matching rules before pagination. Invalid filter values
+return `422`. IDs and PR numbers are in `1..2147483647`; offsets are in
+`0..2147483647`.
+
 ### Configuration export and import
 
 A project's settings and rules can be exported as an
@@ -671,11 +683,16 @@ curl -H "$AUTH" http://127.0.0.1:8000/projects/1/stats
 The project endpoint returns newest-first summaries, 50 per page by default
 (`limit` 1–200, `offset` ≥ 0), filtered by any of `status`, `outcome`,
 `source` and `pull_number`. The global run endpoint returns the summary plus
-the configuration snapshot and every diagnostic. For large runs,
+the configuration snapshot and the stored diagnostics. API and worker runs
+store the first 1,000 rule violations found, plus all analysis errors; summary
+counts and the outcome still include every violation. CLI reports are not
+capped. For large runs,
 `GET /analysis-runs/{id}/diagnostics` pages through them in the engine's order
 (path, line, column, rule key), 100 per page by default (`limit` 1–500),
 filtered by any of `kind`, `severity`, `code`, `rule_key` and `path`. These
 lists also carry `X-Total-Count`. Missing projects or runs return 404.
+Here the diagnostic total counts stored rows, which can be smaller than the
+summary's violation count.
 
 `GET /projects/{id}/stats` summarizes all of a project's runs:
 
@@ -822,7 +839,7 @@ what static analysis cannot see:
 - `app/domain/orders.py:3` error: `app.domain.orders must not import app.infrastructure.db`
 
 Checked 4 changed Python files against 2 rules; 1 excluded, 0 not analyzed. Invariant reads the code without running it, so dynamic imports and calls made through variables are not seen.
-Details: [run 42](https://invariant.example.com/analysis-runs/42) · Invariant 1.0.0
+Details: [run 42](https://invariant.example.com/analysis-runs/42) · Invariant 1.1.0
 ```
 
 An incomplete run says `INCOMPLETE` and that there is no verdict; a run that
@@ -838,7 +855,9 @@ pull request's current head: a run of an older commit, or one older than the
 run the comment already shows, becomes `stale` and stays in the history, so a
 late analysis never presents an old PASS as current. Without the token and
 the opt-in, Invariant writes nothing to GitHub. GitHub Check Runs are out of
-scope for v1.0.
+scope for v1.1. Runs queued before a project's GitHub repository is changed
+still analyze the original repository. Their feedback becomes `stale` when
+the project no longer points there, so comments do not cross repositories.
 
 ## Limits
 

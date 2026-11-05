@@ -12,7 +12,9 @@ from invariant import __version__
 from invariant.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+PACKAGE = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
 
 
 def test_one_version_in_the_package_the_api_the_cli_and_github(client, capsys):
@@ -37,7 +39,7 @@ def test_one_version_in_the_package_the_api_the_cli_and_github(client, capsys):
 
 
 def test_the_changelog_opens_with_this_version_and_its_upgrade_guide():
-    changelog = (ROOT / "CHANGELOG.md").read_text()
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     [latest] = re.findall(r"^## (\S+)", changelog, re.MULTILINE)[:1]
     assert latest == PACKAGE
@@ -61,7 +63,9 @@ def test_the_changelog_opens_with_this_version_and_its_upgrade_guide():
 )
 def test_the_readme_covers_what_the_release_checklist_asks(section):
     assert re.search(
-        rf"^##+ {re.escape(section)}$", (ROOT / "README.md").read_text(), re.MULTILINE
+        rf"^##+ {re.escape(section)}$",
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        re.MULTILINE,
     )
 
 
@@ -84,7 +88,7 @@ def cited_tests(text: str) -> set[tuple[str, str | None]]:
 
 @pytest.mark.parametrize("document", ["v1.0-traceability.md", "release-checklist.md"])
 def test_every_test_the_documents_cite_exists(document):
-    cited = cited_tests((ROOT / "docs" / document).read_text())
+    cited = cited_tests((ROOT / "docs" / document).read_text(encoding="utf-8"))
     assert len(cited) > 10
 
     missing = []
@@ -92,7 +96,9 @@ def test_every_test_the_documents_cite_exists(document):
         path = ROOT / "tests" / f"{module}.py"
         if not path.is_file() or (
             function
-            and not re.search(rf"^def {function}\(", path.read_text(), re.MULTILINE)
+            and not re.search(
+                rf"^def {function}\(", path.read_text(encoding="utf-8"), re.MULTILINE
+            )
         ):
             missing.append(f"{module}::{function}" if function else module)
     assert missing == []
