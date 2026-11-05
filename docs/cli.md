@@ -7,10 +7,10 @@ needs no API, database, token or network.
 ## Installation
 
 ```bash
-pip install "invariant @ git+https://github.com/IliyasNU/invariant@main"
+pip install .  # from a checkout containing this version
 ```
 
-Pin a release tag or commit instead of `main` for reproducible checks. The
+Use a checkout pinned to a release tag or commit for reproducible checks. The
 command needs Python 3.14 or newer; the code it checks can target any Python
 version that 3.14's parser accepts. The package contains only the engine and
 the command, and depends only on pydantic. `python -m invariant` runs the same
@@ -36,7 +36,7 @@ in `pyproject.toml`, and every path in it is relative to `PATH`.
 | `--config FILE` | Use this configuration file instead |
 | `--base REV` | Check only the files changed since the merge base with `REV` |
 | `--head REV` | With `--base`: the commit to check (default `HEAD`) |
-| `--format text\|json` | Output format (default `text`) |
+| `--format text\|json\|sarif` | Output format (default `text`) |
 | `--fail-on error\|warning` | Lowest severity that fails the check, instead of the configured `fail_on` |
 | `--exclude GLOB` | Also exclude files matching this path glob; may be repeated |
 | `--strict` | Treat "nothing was checked" (`not_applicable`) as an error |
@@ -108,6 +108,22 @@ result described in [configuration.md](configuration.md#results)
 `git_diff`), the `config` used, and the `base` and `head` commit IDs in diff
 mode. Messages go to standard error. When the configuration or the command
 line cannot be used, standard output stays empty.
+
+With `--format sarif`, standard output holds one SARIF 2.1.0 report. Rule
+keys become stable SARIF rule IDs, including metadata for disabled rules.
+File locations use percent-encoded paths relative to the project root and
+Unicode code-point columns. Violations are SARIF results; unreadable files,
+syntax errors and other analysis failures are invocation notifications with
+`executionSuccessful: false`, even if a blocking violation gives an overall
+`fail` outcome. The command's exit code stays the same for every format.
+
+```bash
+invariant check . --format sarif > results.sarif
+```
+
+The report follows the [OASIS SARIF 2.1.0 schema](https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json).
+An unusable configuration or command line leaves standard output empty and
+writes the error to standard error, as JSON mode does.
 
 ### Exit codes
 

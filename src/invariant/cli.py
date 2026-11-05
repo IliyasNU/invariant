@@ -35,6 +35,7 @@ from invariant.git import (
 )
 from invariant.paths import PathError, validate_path_glob
 from invariant.result import AnalysisResult, Diagnostic, Outcome
+from invariant.sarif import to_sarif
 
 EXIT_OK = 0
 EXIT_VIOLATIONS = 1
@@ -146,7 +147,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     check.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=("text", "json", "sarif"),
         default="text",
         help="output format (default: text)",
     )
@@ -278,6 +279,8 @@ def _check(args: argparse.Namespace) -> int:
     }
     if args.format == "json":
         _write_json(result, source)
+    elif args.format == "sarif":
+        _write_document(to_sarif(result, config.rules, source=source))
     else:
         _write_text(result, source, sys.stdout, strict=args.strict)
     return exit_code(result.outcome, strict=args.strict)
@@ -412,6 +415,10 @@ def _write_text(
 
 def _write_json(result: AnalysisResult, source: dict[str, Any]) -> None:
     document = {**result.to_dict(), "source": source}
+    _write_document(document)
+
+
+def _write_document(document: dict[str, Any]) -> None:
     text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
     sys.stdout.flush()
     # JSON is UTF-8 whatever the terminal's encoding is.
