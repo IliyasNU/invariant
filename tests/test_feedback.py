@@ -459,3 +459,63 @@ def test_long_paths_and_messages_are_shortened():
     assert len(path) == len(":1") + MAX_TEXT
     assert path.endswith("…:1")
     assert len(message.removesuffix("`")) == MAX_TEXT
+
+
+class DeletingGitHub(CommentingGitHub):
+    """Delete the project while its run's comment is being published."""
+
+    def __init__(self, project_id: int, error: Exception | None) -> None:
+        super().__init__(HEAD_A)
+        self.project_id = project_id
+        self.error = error
+
+    def get_pull_request(self, owner, repo, pull_number) -> PullRequestMetadata:
+        with SessionLocal() as other:
+            other.delete(other.get(Project, self.project_id))
+            other.commit()
+        if self.error is not None:
+            raise self.error
+        return super().get_pull_request(owner, repo, pull_number)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        None,
+        GitHubAPIError(429, "github_rate_limited", "Rate limited", True),
+        RuntimeError("publication failed"),
+    ],
+    ids=["while-publishing", "while-retrying", "on-unexpected-error"],
+)
+def test_a_project_deleted_while_publishing_does_not_stop_the_worker(error):
+    project_id = project_with_rule()
+    run_id = queue(project_id)
+    # Leave an already completed run's comment for the feedback queue.
+    work(CommentingGitHub(HEAD_A))
+    with SessionLocal() as db:
+        done = db.get(AnalysisRun, run_id)
+        done.feedback_status, done.feedback_next_attempt_at = "pending", None
+        db.commit()
+
+    assert work(DeletingGitHub(project_id, error)) == 0
+
+    assert run(run_id) is None
+
+
+@pytest.mark.parametrize("repository", [("new-owner", "new-repo"), (None, None)])
+def test_feedback_is_suppressed_after_the_project_repository_changes(repository):
+    project_id = project_with_rule()
+    run_id = queue(project_id)
+    github = CommentingGitHub(HEAD_A)
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        project.github_owner, project.github_repo = repository
+        db.commit()
+
+    assert work(github) == 1
+
+    completed = run(run_id)
+    assert (completed.status, completed.outcome) == ("completed", "fail")
+    assert (completed.repository_owner, completed.repository_name) == ("o", "r")
+    assert completed.feedback_status == "stale"
+    assert github.created == github.updated == 0

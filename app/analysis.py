@@ -16,6 +16,10 @@ from invariant.config import (
 from invariant.engine import Source, Unreadable, analyze
 from invariant.result import AnalysisResult, Diagnostic
 
+# Violations listed, and stored, per run: whatever the files hold, a run's
+# result stays small enough to store and to send. Its counts include the rest.
+MAX_LISTED_VIOLATIONS = 1000
+
 _RULE_MODELS = {
     "forbidden_import": ForbiddenImportRule,
     "forbidden_call": ForbiddenCallRule,
@@ -96,6 +100,7 @@ def evaluate(
         unreadable=unreadable or [],
         ignored=ignored,
         errors=errors or [],
+        max_violations=MAX_LISTED_VIOLATIONS,
     )
 
 

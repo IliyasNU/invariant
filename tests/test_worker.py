@@ -30,14 +30,18 @@ class FakeGitHub:
     def __init__(self, *errors: Exception) -> None:
         self.errors = list(errors)
         self.calls = 0
+        self.repositories: list[tuple[str, str]] = []
+        self.content_repositories: list[tuple[str, str]] = []
 
     def get_pull_request(self, owner, repo, pull_number) -> PullRequestMetadata:
         self.calls += 1
+        self.repositories.append((owner, repo))
         if self.errors:
             raise self.errors.pop(0)
         return PullRequestMetadata(number=pull_number, head_sha="a" * 40)
 
     def get_changed_python_files(self, owner, repo, pull_request, **options):
+        self.content_repositories.append((owner, repo))
         return ChangedPythonFiles(
             files=[SourceFile(path="app/x.py", content="x = 1\n")],
             skipped=[],
@@ -132,6 +136,49 @@ def test_the_backoff_doubles_and_honours_retry_after():
     assert policy.retry_delay(3, 10).seconds == 120  # never sooner than the backoff
     assert policy.retry_delay(10, None) == timedelta(minutes=5)
     assert policy.retry_delay(1, 86_400) == timedelta(minutes=5)
+
+
+@pytest.mark.parametrize("retry_after", [1e15, float("inf")])
+def test_an_excessive_retry_after_is_capped_without_stopping_the_worker(retry_after):
+    [run_id] = queue_runs()
+    error = GitHubAPIError(
+        429,
+        "github_rate_limited",
+        "GitHub API rate limit exceeded",
+        transient=True,
+        retry_after=retry_after,
+    )
+
+    before = datetime.now(UTC)
+    assert work(FakeGitHub(error), retry_max=timedelta(minutes=5)) == 1
+
+    waiting = load(run_id)
+    assert (waiting.status, waiting.locked_by) == ("queued", None)
+    wait = waiting.next_attempt_at.replace(tzinfo=UTC) - before
+    assert timedelta(minutes=4, seconds=59) < wait < timedelta(minutes=5, seconds=5)
+
+
+@pytest.mark.parametrize("retry_after", [float("nan"), float("-inf"), -1])
+def test_invalid_retry_after_does_not_extend_the_backoff(retry_after):
+    assert Policy().retry_delay(1, retry_after) == timedelta(seconds=30)
+
+
+@pytest.mark.parametrize("repository", [("new-owner", "new-repo"), (None, None)])
+def test_queued_runs_keep_their_repository_after_project_reconfiguration(repository):
+    [run_id] = queue_runs()
+    with SessionLocal() as db:
+        project = db.get(Project, load(run_id).project_id)
+        project.github_owner, project.github_repo = repository
+        db.commit()
+
+    github = FakeGitHub()
+    assert work(github) == 1
+
+    completed = load(run_id)
+    assert (completed.status, completed.outcome) == ("completed", "pass")
+    assert (completed.repository_owner, completed.repository_name) == ("o", "r")
+    assert github.repositories == [("o", "r")]
+    assert github.content_repositories == [("o", "r")]
 
 
 def test_attempts_are_limited():
@@ -297,3 +344,51 @@ def test_concurrent_identical_deliveries_queue_one_job():
         thread.join()
 
     assert sorted(outcomes) == ["duplicate"] * 4 + ["queued"]
+
+
+class DeletingGitHub(FakeGitHub):
+    """Delete the run's project while its worker is opening or fetching it."""
+
+    def __init__(self, project_id: int, when: str, *errors: Exception) -> None:
+        super().__init__(*errors)
+        self.project_id = project_id
+        self.when = when
+        self.deleted = False
+
+    def _delete_project(self) -> None:
+        if self.deleted:
+            return
+        with SessionLocal() as other:
+            other.delete(other.get(Project, self.project_id))
+            other.commit()
+        self.deleted = True
+
+    def __enter__(self) -> Self:
+        if self.when == "before":
+            self._delete_project()
+        return self
+
+    def get_pull_request(self, owner, repo, pull_number) -> PullRequestMetadata:
+        if self.when == "during":
+            self._delete_project()
+        return super().get_pull_request(owner, repo, pull_number)
+
+
+@pytest.mark.parametrize(
+    ("when", "errors"),
+    [("before", ()), ("during", ()), ("during", (RATE_LIMITED,))],
+    ids=["before-analysis", "during-analysis", "during-retry"],
+)
+def test_deleting_a_project_does_not_stop_the_worker(when, errors):
+    [deleted] = queue_runs()
+    project_id = load(deleted).project_id
+    with SessionLocal() as db:
+        other = Project(name="Other", github_owner="o2", github_repo="r2")
+        db.add(other)
+        db.commit()
+        kept = enqueue_github_analysis(db, other, 8, source="github_pr").id
+
+    assert work(DeletingGitHub(project_id, when, *errors)) == 2
+
+    assert load(deleted) is None
+    assert (load(kept).status, load(kept).outcome) == ("completed", "not_applicable")

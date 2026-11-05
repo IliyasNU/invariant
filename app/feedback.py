@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.github import GitHubAPIError, GitHubClient
-from app.models import AnalysisRun, PullRequestComment
+from app.models import AnalysisRun, Project, PullRequestComment
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,10 @@ def feedback_body(run: AnalysisRun, public_url: str | None = None) -> str:
             where += f":{item.line}"
         label = item.severity if item.kind == "violation" else "not analyzed"
         lines.append(f"- {_code(where)} {label}: {_code(_shorten(item.message))}")
-    if len(run.violations) > MAX_ITEMS:
-        lines.append(f"- … and {len(run.violations) - MAX_ITEMS} more")
+    found = run.violation_count + run.analysis_error_count
+    shown = min(len(run.violations), MAX_ITEMS)
+    if found > shown:
+        lines.append(f"- … and {found - shown} more")
     if run.violations:
         lines.append("")
     lines.append(
@@ -175,6 +177,21 @@ def hold(run: AnalysisRun, hold_seconds: float, now: datetime) -> None:
     run.feedback_next_attempt_at = now + timedelta(seconds=hold_seconds)
 
 
+def _deleted(db: Session, run_id: int) -> bool:
+    """A deleted run has no feedback left to update; otherwise lock it."""
+    exists = db.scalar(
+        select(AnalysisRun.id).where(AnalysisRun.id == run_id).with_for_update()
+    )
+    if exists is None:
+        db.rollback()
+        logger.info(
+            "Run %s was deleted with its project; its comment is dropped",
+            run_id,
+            extra={"event": "feedback_dropped"},
+        )
+    return exists is None
+
+
 def publish_feedback(
     db: Session,
     run: AnalysisRun,
@@ -192,7 +209,29 @@ def publish_feedback(
     """
     owner, repo = run.repository_owner, run.repository_name
     assert owner and repo and run.pull_number is not None
+    # Rollback expires ORM attributes, and this run may have been deleted.
+    run_id = run.id
     try:
+        repository = db.execute(
+            select(Project.github_owner, Project.github_repo).where(
+                Project.id == run.project_id
+            )
+        ).one_or_none()
+        if repository is None:
+            _deleted(db, run_id)
+            return
+        if tuple(repository) != (owner, repo):
+            # Comments are tracked per project and PR number. Do not mix an
+            # old repository's feedback with the project's new integration.
+            run.feedback_status = "stale"
+            run.feedback_error = run.feedback_next_attempt_at = None
+            db.commit()
+            logger.info(
+                "The repository for run %s changed; its comment is dropped",
+                run_id,
+                extra={"event": "feedback_stale", "reason": "repository_changed"},
+            )
+            return
         head = github.get_pull_request(owner, repo, run.pull_number).head_sha
         record = _comment_record(db, run)
         newer = record.analysis_run_id is not None and record.analysis_run_id > run.id
@@ -233,6 +272,8 @@ def publish_feedback(
         )
     except GitHubAPIError as exc:
         db.rollback()
+        if _deleted(db, run_id):
+            return
         run.feedback_error = exc.code
         if exc.transient and run.feedback_attempts < max_attempts:
             delay = retry_delay(run.feedback_attempts, exc.retry_after)
@@ -260,6 +301,8 @@ def publish_feedback(
         db.commit()
     except Exception:
         db.rollback()
+        if _deleted(db, run_id):
+            return
         logger.exception(
             "The comment for run %s failed unexpectedly",
             run.id,

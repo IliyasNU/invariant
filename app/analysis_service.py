@@ -67,8 +67,11 @@ def _complete(
     """Record ``result`` in ``run``, with what was checked and when."""
     snapshot, digest = config_snapshot(project, rules)
     finished_at = _now()
-    run.repository_owner = project.github_owner
-    run.repository_name = project.github_repo
+    # Queued GitHub runs retain the repository accepted when they were queued.
+    # The project's integration may have changed while the run was waiting.
+    if pull_request is None:
+        run.repository_owner = project.github_owner
+        run.repository_name = project.github_repo
     if pull_request is not None:
         run.base_sha, run.head_sha = pull_request.base_sha, pull_request.head_sha
     run.started_at, run.finished_at = started_at, finished_at
@@ -87,10 +90,9 @@ def _complete(
     run.rules_total = result.rules_total
     run.rules_evaluated = result.rules_enabled
     run.evaluations = result.evaluations
-    violations = result.violations
-    run.violation_count = len(violations)
-    run.error_count = sum(item.severity == "error" for item in violations)
-    run.warning_count = sum(item.severity == "warning" for item in violations)
+    # The summary includes findings omitted by the stored-violation limit.
+    run.error_count, run.warning_count = result.error_count, result.warning_count
+    run.violation_count = run.error_count + run.warning_count
     run.analysis_error_count = len(result.errors)
     rule_ids = {rule.key: rule.id for rule in rules}
     run.violations = [
@@ -221,20 +223,19 @@ def execute_github_analysis(
     started_at = _now()
     run.started_at = started_at
     project = db.get(Project, run.project_id)
-    if project is None or not project.github_owner or not project.github_repo:
+    owner, repo = run.repository_owner, run.repository_name
+    if project is None or not owner or not repo:
         raise GitHubAPIError(
             status_code=409,
             code="github_not_configured",
-            message="Project has no GitHub owner/repository configuration",
+            message="The run has no project or GitHub repository configuration",
         )
     rules = _project_rules(db, project)
     assert run.pull_number is not None
     began = time.monotonic()
-    pull_request = github.get_pull_request(
-        project.github_owner, project.github_repo, run.pull_number
-    )
+    pull_request = github.get_pull_request(owner, repo, run.pull_number)
     changed = github.get_changed_python_files(
-        project.github_owner, project.github_repo, pull_request, deadline=deadline
+        owner, repo, pull_request, deadline=deadline
     )
     logger.info(
         "Pull request %s fetched at %s",

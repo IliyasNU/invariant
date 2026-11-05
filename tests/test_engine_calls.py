@@ -98,6 +98,63 @@ def test_class_variables_do_not_shadow_names_inside_methods():
     assert targets(source) == ["os.system"]
 
 
+def test_nonlocal_rebinding_skips_functions_without_a_local_binding():
+    source = (
+        "def outer():\n"
+        "    import os\n"
+        "    def middle():\n"
+        "        def inner():\n"
+        "            nonlocal os\n"
+        "            os = 1\n"
+        "    os.system('x')\n"
+    )
+
+    assert targets(source) == []
+
+
+def test_nonlocal_rebinding_changes_only_the_nearest_binding():
+    source = (
+        "def outer():\n"
+        "    import os\n"
+        "    def middle():\n"
+        "        import os\n"
+        "        def inner():\n"
+        "            nonlocal os\n"
+        "            os = 1\n"
+        "        os.system('inner')\n"
+        "    os.system('outer')\n"
+    )
+
+    assert targets(source) == ["os.system"]
+
+
+def test_nested_function_inherits_an_enclosing_global_declaration():
+    source = (
+        "import os\n"
+        "def outer():\n"
+        "    os = 1\n"
+        "    def inner():\n"
+        "        global os\n"
+        "        def nested():\n"
+        "            os.system('x')\n"
+    )
+
+    assert targets(source) == ["os.system"]
+
+
+def test_class_global_declaration_does_not_change_method_lookup():
+    source = (
+        "def outer():\n"
+        "    import os\n"
+        "    class A:\n"
+        "        global os\n"
+        "        def method(self):\n"
+        "            os.system('x')\n"
+    )
+
+    assert targets(source) == ["os.system"]
+
+
 def test_defaults_and_decorators_resolve_in_the_enclosing_scope():
     source = "import os\ndef f(os, cwd=os.getcwd()):\n    os.system('x')\n"
 

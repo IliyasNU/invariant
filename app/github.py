@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -67,12 +68,26 @@ class GitHubAPIError(Exception):
 
 def _retry_after(response: httpx.Response) -> float | None:
     """The wait GitHub asks for: Retry-After, or until X-RateLimit-Reset."""
-    retry_after = response.headers.get("Retry-After", "")
-    if retry_after.isdigit():
-        return float(retry_after)
-    reset = response.headers.get("X-RateLimit-Reset", "")
-    if reset.isdigit():
-        return max(0.0, int(reset) - time.time())
+
+    def seconds(header: str) -> float | None:
+        # HTTP delta-seconds and epoch timestamps use ASCII digits. isdigit()
+        # also accepts characters that float()/int() cannot parse. Very large
+        # integers can overflow to infinity or exceed int()'s conversion limit.
+        value = response.headers.get(header, "")
+        if re.fullmatch(r"[0-9]+", value) is None:
+            return None
+        try:
+            parsed = float(value)
+        except ValueError, OverflowError:
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    retry_after = seconds("Retry-After")
+    if retry_after is not None:
+        return retry_after
+    reset = seconds("X-RateLimit-Reset")
+    if reset is not None:
+        return max(0.0, reset - time.time())
     return None
 
 
@@ -280,6 +295,12 @@ class GitHubClient:
             ):
                 ignored += 1
                 continue
+            # GitHub paths use POSIX separators. A literal backslash is a
+            # file-name character there, but SourceFile normalizes it to '/'
+            # for Windows API callers. Do not check a different module/path.
+            if "\\" in path:
+                skipped.append(SkippedFile(path, "invalid_path"))
+                continue
             try:
                 # Validate the path before downloading anything for it.
                 SourceFile(path=path, content="")
@@ -377,7 +398,9 @@ def _check_status(response: httpx.Response) -> None:
 
 
 def verify_webhook_signature(body: bytes, signature: str | None, secret: str) -> bool:
-    if not signature or not signature.startswith("sha256="):
+    # compare_digest rejects non-ASCII strings. Validate the header's wire
+    # format first so malformed, unauthenticated requests are rejected safely.
+    if signature is None or re.fullmatch(r"sha256=[0-9a-f]{64}", signature) is None:
         return False
     expected = (
         "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()

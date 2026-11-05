@@ -55,6 +55,7 @@ class _Collector:
         self.package = package
         self.calls: list[tuple[ast.expr, Scope]] = []
         self.pending: list[tuple[ast.AST, Scope]] = []
+        self.nonlocal_bindings: list[tuple[str, Scope, str | None]] = []
 
     def module(self, tree: ast.Module) -> None:
         scope = Scope("module", None)
@@ -65,6 +66,11 @@ class _Collector:
         # so the order nodes are processed in does not matter.
         while self.pending:
             self.process(*self.pending.pop())
+        # A nonlocal name belongs to the nearest enclosing function that
+        # actually binds it, which need not be the immediately enclosing one.
+        # All local bindings must be known before finding that owner.
+        for name, scope, target in self.nonlocal_bindings:
+            self.owner(name, scope).bind(name, target)
 
     # Binding targets -------------------------------------------------------
 
@@ -81,6 +87,9 @@ class _Collector:
             self.visit(target, scope)
 
     def bind(self, name: str, scope: Scope, target: str | None = _OTHER) -> None:
+        if name in scope.nonlocal_names:
+            self.nonlocal_bindings.append((name, scope, target))
+            return
         owner = self.owner(name, scope)
         owner.bind(name, target)
 
@@ -89,12 +98,14 @@ class _Collector:
         if name in scope.global_names:
             return self.module_scope
         if name in scope.nonlocal_names:
-            # The enclosing function's own bindings may not be collected yet;
-            # the nearest enclosing function is where nonlocal names live.
             outer = scope.parent
-            while outer is not None and outer.kind != "function":
+            while outer is not None:
+                if outer.kind == "function" and name in outer.bindings:
+                    return outer
                 outer = outer.parent
-            return outer or self.module_scope
+            # Invalid nonlocal declarations are accepted by ast.parse; never
+            # claim a proven import after such an unknown rebinding.
+            return self.module_scope
         return scope
 
     # Visiting --------------------------------------------------------------
@@ -289,6 +300,14 @@ def _lookup(name: str, scope: Scope, module: Scope) -> str | None:
     current: Scope | None = scope
     first = True
     while current is not None:
+        # A nested function can inherit an enclosing global declaration. Class
+        # scopes, including their declarations, are not enclosing name scopes.
+        if not first and current.kind == "class":
+            current = current.parent
+            continue
+        if current is not module and name in current.global_names:
+            current = module
+            continue
         # ``from x import *`` may rebind any name, even one imported explicitly.
         if current.star_import:
             return None

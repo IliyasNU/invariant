@@ -73,6 +73,22 @@ def test_a_file_over_the_limit_is_abandoned_while_streaming():
     assert MAX_FILE_BYTES < body.served <= MAX_FILE_BYTES + 65_536
 
 
+def test_literal_backslash_filename_is_not_analyzed_under_another_path():
+    path = "app\\domain\\service.py"
+
+    def contents(_name):
+        pytest.fail("A filename containing a literal backslash must not be fetched")
+
+    with client(pull_request_with([path], contents)) as github:
+        changed = github.get_changed_python_files(
+            "o", "r", PullRequestMetadata(number=7, head_sha=HEAD)
+        )
+
+    assert changed.files == []
+    assert changed.skipped == [SkippedFile(path, "invalid_path")]
+    assert not changed.complete
+
+
 def test_a_declared_length_over_the_limit_is_not_read_at_all():
     body = Stream(MAX_FILE_BYTES + 1)
 
@@ -212,6 +228,34 @@ def test_a_rate_limit_reset_sets_the_wait(monkeypatch):
         github.get_pull_request("o", "r", 7)
 
     assert (error.value.code, error.value.retry_after) == ("github_rate_limited", 90)
+
+
+@pytest.mark.parametrize("header", ["Retry-After", "X-RateLimit-Reset"])
+@pytest.mark.parametrize("value", [b"\xb2", "9" * 10_000, "inf", "NaN", "-1"])
+def test_malformed_rate_limit_wait_is_ignored_without_crashing(header, value):
+    def handler(_request):
+        return httpx.Response(429, headers={header: value})
+
+    with client(handler) as github, pytest.raises(GitHubAPIError) as error:
+        github.get_pull_request("o", "r", 7)
+
+    assert error.value.code == "github_rate_limited"
+    assert error.value.transient
+    assert error.value.retry_after is None
+
+
+def test_invalid_retry_after_falls_back_to_valid_rate_limit_reset(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+
+    def handler(_request):
+        return httpx.Response(
+            429, headers={"Retry-After": "9" * 10_000, "X-RateLimit-Reset": "1090"}
+        )
+
+    with client(handler) as github, pytest.raises(GitHubAPIError) as error:
+        github.get_pull_request("o", "r", 7)
+
+    assert error.value.retry_after == 90
 
 
 @pytest.mark.parametrize(

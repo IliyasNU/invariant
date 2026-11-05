@@ -101,13 +101,17 @@ def analyze(
     ignored: int = 0,
     errors: Iterable[Diagnostic] = (),
     fail_on: Literal["error", "warning"] | None = None,
+    max_violations: int | None = None,
 ) -> AnalysisResult:
     """Check ``sources`` against ``rules``.
 
     ``unreadable`` lists files the caller could not load, ``ignored`` counts
     removed or non-Python files, and ``errors`` carries problems found before
     analysis (such as a truncated file list). ``fail_on`` overrides the
-    project's threshold.
+    project's threshold. ``max_violations`` limits how many violations are
+    listed, the first ones found; the outcome and the counts still include
+    the others, so a caller that stores the result has a bounded amount to
+    store whatever the files hold.
     """
     settings = settings or ProjectSettings()
     threshold = fail_on or settings.fail_on
@@ -117,6 +121,8 @@ def analyze(
     sources = list(sources)
     unreadable = list(unreadable)
     eligible = analyzed = excluded = skipped = evaluations = 0
+    listed = 0
+    omitted = {"error": 0, "warning": 0}
 
     def is_excluded(path: str) -> bool:
         return roots.locate(path) is None or matches_any(path, settings.exclude_paths)
@@ -169,15 +175,22 @@ def analyze(
         for rule in enabled:
             if rule_applies(rule, location.module, path):
                 evaluations += 1
-                diagnostics.extend(CHECKERS[rule.rule_type](rule, parsed))
+                found = CHECKERS[rule.rule_type](rule, parsed)
+                if max_violations is not None and listed + len(found) > max_violations:
+                    room = max(0, max_violations - listed)
+                    for item in found[room:]:
+                        omitted[item.severity] += 1
+                    found = found[:room]
+                listed += len(found)
+                diagnostics.extend(found)
 
     diagnostics.sort(key=Diagnostic.sort_key)
-    blocking = [
-        item
-        for item in diagnostics
-        if item.kind == "violation"
+    blocking = omitted["error"] + (omitted["warning"] if threshold == "warning" else 0)
+    blocking += sum(
+        item.kind == "violation"
         and (item.severity == "error" or threshold == "warning")
-    ]
+        for item in diagnostics
+    )
     if blocking:
         outcome = Outcome.FAIL
     elif any(item.kind == "error" for item in diagnostics):
@@ -202,4 +215,6 @@ def analyze(
         rules_enabled=len(enabled),
         evaluations=evaluations,
         diagnostics=tuple(diagnostics),
+        omitted_errors=omitted["error"],
+        omitted_warnings=omitted["warning"],
     )

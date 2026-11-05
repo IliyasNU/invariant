@@ -369,6 +369,7 @@ def valid_event(**changes) -> dict:
         valid_event(pull_request={"number": "12"}),
         valid_event(pull_request={"number": True}),
         valid_event(pull_request={"number": 0}),
+        valid_event(pull_request={"number": 2**31}),
         valid_event(pull_request=[]),
     ],
 )
@@ -469,6 +470,35 @@ def test_webhook_signature_validation():
     assert not verify_webhook_signature(body + b" ", signature, WEBHOOK_SECRET)
     assert not verify_webhook_signature(body, "sha1=bad", WEBHOOK_SECRET)
     assert not verify_webhook_signature(body, None, WEBHOOK_SECRET)
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "sha256=é",
+        "sha256=" + "é" * 64,
+        "sha256=" + "0" * 63,
+        "sha256=" + "0" * 65,
+        "sha256=" + "g" * 64,
+        "sha256=" + "0" * 64 + "\n",
+    ],
+)
+def test_webhook_signature_rejects_malformed_header_without_raising(signature):
+    assert not verify_webhook_signature(b"{}", signature, WEBHOOK_SECRET)
+
+
+def test_webhook_rejects_non_ascii_signature(client, github, monkeypatch):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+
+    response = client.post(
+        "/integrations/github/webhook",
+        content=b"{}",
+        headers={"X-Hub-Signature-256": b"sha256=\xff"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_github_signature"
+    assert github.pull_calls == 0
 
 
 def test_webhook_rejects_invalid_signature(client, github, monkeypatch):

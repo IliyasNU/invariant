@@ -99,6 +99,9 @@ class AnalysisResult:
     # Pairs of (analyzed file, enabled rule that applies to it).
     evaluations: int
     diagnostics: tuple[Diagnostic, ...]
+    # Violations found but not listed, past the caller's ``max_violations``.
+    omitted_errors: int = 0
+    omitted_warnings: int = 0
 
     @property
     def passed(self) -> bool | None:
@@ -117,8 +120,19 @@ class AnalysisResult:
     def errors(self) -> tuple[Diagnostic, ...]:
         return tuple(item for item in self.diagnostics if item.kind == "error")
 
+    @property
+    def error_count(self) -> int:
+        """Violations of severity error, listed or not."""
+        listed = sum(item.severity == "error" for item in self.violations)
+        return listed + self.omitted_errors
+
+    @property
+    def warning_count(self) -> int:
+        """Violations of severity warning, listed or not."""
+        listed = sum(item.severity == "warning" for item in self.violations)
+        return listed + self.omitted_warnings
+
     def to_dict(self) -> dict[str, Any]:
-        violations = self.violations
         return {
             "schema_version": RESULT_SCHEMA_VERSION,
             "engine_version": __version__,
@@ -139,8 +153,8 @@ class AnalysisResult:
                 "evaluations": self.evaluations,
             },
             "summary": {
-                "errors": sum(item.severity == "error" for item in violations),
-                "warnings": sum(item.severity == "warning" for item in violations),
+                "errors": self.error_count,
+                "warnings": self.warning_count,
                 "analysis_errors": len(self.errors),
             },
             "diagnostics": [item.to_dict() for item in self.diagnostics],
