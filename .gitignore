@@ -223,3 +223,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Optional native performance probe; binaries are never source artifacts.
+benchmarks/native_prefix_probe
+benchmarks/native_prefix_probe.exe
+benchmarks/native_prefix_probe.dll
+benchmarks/native_prefix_probe.so
+benchmarks/native_prefix_probe.dylib

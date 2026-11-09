@@ -29,7 +29,8 @@ invariant check .
 The service, with PostgreSQL, the API and the worker, in Docker:
 
 ```bash
-git clone https://github.com/IliyasNU/invariant && cd invariant
+git clone --branch codex/v1.1-fixes https://github.com/IliyasNU/invariant
+cd invariant
 cp .env.example .env
 # Set INVARIANT_API_KEY in .env to a random value, such as the output of:
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
@@ -933,6 +934,10 @@ like a GitHub token, a bearer credential or a password in a URL. Invariant
 does not log source code or request bodies.
 
 ## Testing and quality checks
+
+Engine optimizations, reproducible benchmark commands and the C++ assessment
+are documented in [performance measurements](docs/performance.md). Timing
+comparisons verify result parity and keep profiling separate from timed runs.
 
 External GitHub calls are mocked; tests require no token and do not mutate a
 GitHub repository. SQLite (with foreign keys enabled) provides fast per-test

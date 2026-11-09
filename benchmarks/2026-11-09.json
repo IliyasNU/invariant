@@ -1,0 +1,586 @@
+{
+  "description": "Historical measurements recorded for commit 5e5ab25. Final hardening changes are verified separately; these are not new measurements.",
+  "environment": {
+    "python": "3.14.5 (tags/v3.14.5:5607950, May 10 2026, 10:43:50) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "processor": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "machine": "AMD64",
+    "cpu_count": 12
+  },
+  "baseline_commit": "9d7af360d57400d2ca064095c0f7de2829526da1",
+  "method": {
+    "warmups": 1,
+    "gc": "collect before each timed sample; enabled during analysis",
+    "timing": "perf_counter; engine only; profile and tracemalloc in separate runs"
+  },
+  "baseline": {
+    "cases": [
+      {
+        "name": "small_clean",
+        "workload_sha256": "af14acea89dce551e96430b2a11d0b3651d9d9c9e70cdd77346a03ae5bc87dfc",
+        "timing_seconds": {
+          "median": 0.05229510000208393,
+          "min": 0.047945400001481175,
+          "samples": [
+            0.054743100015912205,
+            0.05953200001385994,
+            0.05229510000208393,
+            0.05255209997994825,
+            0.047945400001481175,
+            0.052071800018893555,
+            0.05162789998576045
+          ]
+        },
+        "memory_bytes": {
+          "retained": 21168,
+          "peak": 442132
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "pass",
+            "passed": true,
+            "fail_on": "error",
+            "files": {
+              "total": 12,
+              "eligible": 12,
+              "analyzed": 12,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 8,
+              "enabled": 8,
+              "evaluations": 96
+            },
+            "summary": {
+              "errors": 0,
+              "warnings": 0,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 0,
+          "diagnostics_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "result_sha256": "b3fe7bf3f6444d4f904acdb19d40b01089b04aa64df71f6f87a55eb899f6a7ab"
+        }
+      },
+      {
+        "name": "multi_rule_clean",
+        "workload_sha256": "2f8cd252a37ce62a94d0dcc9e8ee52aea2614f6de43ac037c8e90aa91568a4d6",
+        "timing_seconds": {
+          "median": 4.406435299984878,
+          "min": 4.03117060000659,
+          "samples": [
+            5.0357039000082295,
+            5.641807899984997,
+            4.49290480001946,
+            4.406435299984878,
+            4.18304880001233,
+            4.03117060000659,
+            4.367001800012076
+          ]
+        },
+        "memory_bytes": {
+          "retained": 37104,
+          "peak": 1255944
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "pass",
+            "passed": true,
+            "fail_on": "error",
+            "files": {
+              "total": 60,
+              "eligible": 60,
+              "analyzed": 60,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 64,
+              "enabled": 64,
+              "evaluations": 3840
+            },
+            "summary": {
+              "errors": 0,
+              "warnings": 0,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 0,
+          "diagnostics_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "result_sha256": "0141da30733954360b8efd6f5c8fa04353ccf1908f6161d5c1edd4f025ea93c5"
+        }
+      },
+      {
+        "name": "import_heavy_capped",
+        "workload_sha256": "b85514285241e5346b13ce8d1b875f3c5c83af33f59234152f25ae74d46513df",
+        "timing_seconds": {
+          "median": 0.8335137999965809,
+          "min": 0.7765765000076499,
+          "samples": [
+            0.7881601999979466,
+            0.9841254000202753,
+            1.743217100010952,
+            1.3113206999842077,
+            0.8335137999965809,
+            0.7765765000076499,
+            0.8138266000023577
+          ]
+        },
+        "memory_bytes": {
+          "retained": 609016,
+          "peak": 1419606
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "fail",
+            "passed": false,
+            "fail_on": "error",
+            "files": {
+              "total": 16,
+              "eligible": 16,
+              "analyzed": 16,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 48,
+              "enabled": 48,
+              "evaluations": 768
+            },
+            "summary": {
+              "errors": 138240,
+              "warnings": 46080,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 1000,
+          "diagnostics_sha256": "8f1c59ad8647519cc5cc04781ecdc80b7b341ef61906fe3d9db36ae188cc79f6",
+          "result_sha256": "8fed89a631d96149f7e20e7bb1d7eeea3584c162fb81facc10f88df246f647b5"
+        }
+      },
+      {
+        "name": "call_heavy",
+        "workload_sha256": "451ebd01242221816e1d5f154306a039efcfbae56a3244d066a85fb00a79389a",
+        "timing_seconds": {
+          "median": 0.34751419999520294,
+          "min": 0.3262533000088297,
+          "samples": [
+            0.34751419999520294,
+            0.3352555000165012,
+            0.3262533000088297,
+            0.33180370001355186,
+            0.3538647999812383,
+            0.5711035999993328,
+            0.4110435000038706
+          ]
+        },
+        "memory_bytes": {
+          "retained": 629903,
+          "peak": 3784834
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "fail",
+            "passed": false,
+            "fail_on": "error",
+            "files": {
+              "total": 16,
+              "eligible": 16,
+              "analyzed": 16,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 12,
+              "enabled": 12,
+              "evaluations": 192
+            },
+            "summary": {
+              "errors": 20480,
+              "warnings": 10240,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 1000,
+          "diagnostics_sha256": "a10bc5a28e9ea2582b5856e6fcc92f6b8b86617f27cf1151e52c83f820c4a4f4",
+          "result_sha256": "9a4e4ff1bbf588772eb8f22d29ae52e65415aed45aaebf0d16ae83459660e418"
+        }
+      },
+      {
+        "name": "dense_file_capped",
+        "workload_sha256": "84d071f5e1b2a82114ad7ba1b8c7aa5bb1c48b3a4d2b7f495ec2624a7112c689",
+        "timing_seconds": {
+          "median": 0.5698656000022311,
+          "min": 0.5567508999956772,
+          "samples": [
+            0.5567508999956772,
+            0.566752600017935,
+            0.5583778000145685,
+            0.5698656000022311,
+            0.669441200006986,
+            0.7494541000050958,
+            1.2366930000134744
+          ]
+        },
+        "memory_bytes": {
+          "retained": 589977,
+          "peak": 72479477
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "fail",
+            "passed": false,
+            "fail_on": "error",
+            "files": {
+              "total": 1,
+              "eligible": 1,
+              "analyzed": 1,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 3,
+              "enabled": 3,
+              "evaluations": 3
+            },
+            "summary": {
+              "errors": 120000,
+              "warnings": 0,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 1000,
+          "diagnostics_sha256": "6d73317e12c49de9c1f211405dd20d7d0d45d40ed177fb84d25ccc9fe8284a67",
+          "result_sha256": "28079089eefbbc24ac8c6480ea0ab007a0ee08bb6a5a4b511f89c9b91e1006a5"
+        }
+      }
+    ]
+  },
+  "optimized": {
+    "cases": [
+      {
+        "name": "small_clean",
+        "workload_sha256": "af14acea89dce551e96430b2a11d0b3651d9d9c9e70cdd77346a03ae5bc87dfc",
+        "timing_seconds": {
+          "median": 0.01934689999325201,
+          "min": 0.0185631999920588,
+          "samples": [
+            0.01975289999973029,
+            0.020951000013155863,
+            0.01895289999083616,
+            0.021398100012447685,
+            0.01934689999325201,
+            0.019039300008444116,
+            0.0185631999920588
+          ]
+        },
+        "memory_bytes": {
+          "retained": 27664,
+          "peak": 454364
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "pass",
+            "passed": true,
+            "fail_on": "error",
+            "files": {
+              "total": 12,
+              "eligible": 12,
+              "analyzed": 12,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 8,
+              "enabled": 8,
+              "evaluations": 96
+            },
+            "summary": {
+              "errors": 0,
+              "warnings": 0,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 0,
+          "diagnostics_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "result_sha256": "b3fe7bf3f6444d4f904acdb19d40b01089b04aa64df71f6f87a55eb899f6a7ab"
+        }
+      },
+      {
+        "name": "multi_rule_clean",
+        "workload_sha256": "2f8cd252a37ce62a94d0dcc9e8ee52aea2614f6de43ac037c8e90aa91568a4d6",
+        "timing_seconds": {
+          "median": 0.30020490000606515,
+          "min": 0.29665279999608174,
+          "samples": [
+            0.2981696000206284,
+            0.31262869999045506,
+            0.30020490000606515,
+            0.2970084999979008,
+            0.3042145000072196,
+            0.31056029998580925,
+            0.29665279999608174
+          ]
+        },
+        "memory_bytes": {
+          "retained": 45016,
+          "peak": 1303016
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "pass",
+            "passed": true,
+            "fail_on": "error",
+            "files": {
+              "total": 60,
+              "eligible": 60,
+              "analyzed": 60,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 64,
+              "enabled": 64,
+              "evaluations": 3840
+            },
+            "summary": {
+              "errors": 0,
+              "warnings": 0,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 0,
+          "diagnostics_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "result_sha256": "0141da30733954360b8efd6f5c8fa04353ccf1908f6161d5c1edd4f025ea93c5"
+        }
+      },
+      {
+        "name": "import_heavy_capped",
+        "workload_sha256": "b85514285241e5346b13ce8d1b875f3c5c83af33f59234152f25ae74d46513df",
+        "timing_seconds": {
+          "median": 0.1822775000182446,
+          "min": 0.1801700000069104,
+          "samples": [
+            0.2010874999978114,
+            0.18393910001032054,
+            0.18199059998732992,
+            0.1822775000182446,
+            0.1801700000069104,
+            0.1806695999985095,
+            0.1987749999971129
+          ]
+        },
+        "memory_bytes": {
+          "retained": 674864,
+          "peak": 1501097
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "fail",
+            "passed": false,
+            "fail_on": "error",
+            "files": {
+              "total": 16,
+              "eligible": 16,
+              "analyzed": 16,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 48,
+              "enabled": 48,
+              "evaluations": 768
+            },
+            "summary": {
+              "errors": 138240,
+              "warnings": 46080,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 1000,
+          "diagnostics_sha256": "8f1c59ad8647519cc5cc04781ecdc80b7b341ef61906fe3d9db36ae188cc79f6",
+          "result_sha256": "8fed89a631d96149f7e20e7bb1d7eeea3584c162fb81facc10f88df246f647b5"
+        }
+      },
+      {
+        "name": "call_heavy",
+        "workload_sha256": "451ebd01242221816e1d5f154306a039efcfbae56a3244d066a85fb00a79389a",
+        "timing_seconds": {
+          "median": 0.20891139999730512,
+          "min": 0.2014465999964159,
+          "samples": [
+            0.20891139999730512,
+            0.2055920000129845,
+            0.2069132000033278,
+            0.2094214999815449,
+            0.21075920001021586,
+            0.21233330000541173,
+            0.2014465999964159
+          ]
+        },
+        "memory_bytes": {
+          "retained": 656963,
+          "peak": 3806030
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "fail",
+            "passed": false,
+            "fail_on": "error",
+            "files": {
+              "total": 16,
+              "eligible": 16,
+              "analyzed": 16,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 12,
+              "enabled": 12,
+              "evaluations": 192
+            },
+            "summary": {
+              "errors": 20480,
+              "warnings": 10240,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 1000,
+          "diagnostics_sha256": "a10bc5a28e9ea2582b5856e6fcc92f6b8b86617f27cf1151e52c83f820c4a4f4",
+          "result_sha256": "9a4e4ff1bbf588772eb8f22d29ae52e65415aed45aaebf0d16ae83459660e418"
+        }
+      },
+      {
+        "name": "dense_file_capped",
+        "workload_sha256": "84d071f5e1b2a82114ad7ba1b8c7aa5bb1c48b3a4d2b7f495ec2624a7112c689",
+        "timing_seconds": {
+          "median": 0.20459969999501482,
+          "min": 0.201341300009517,
+          "samples": [
+            0.21548230000189506,
+            0.20775800000410527,
+            0.20459969999501482,
+            0.21771799999987707,
+            0.201341300009517,
+            0.20149829998263158,
+            0.20187460002489388
+          ]
+        },
+        "memory_bytes": {
+          "retained": 590217,
+          "peak": 72480981
+        },
+        "result": {
+          "summary": {
+            "schema_version": 1,
+            "outcome": "fail",
+            "passed": false,
+            "fail_on": "error",
+            "files": {
+              "total": 1,
+              "eligible": 1,
+              "analyzed": 1,
+              "excluded": 0,
+              "skipped": 0,
+              "ignored": 0
+            },
+            "rules": {
+              "total": 3,
+              "enabled": 3,
+              "evaluations": 3
+            },
+            "summary": {
+              "errors": 120000,
+              "warnings": 0,
+              "analysis_errors": 0
+            }
+          },
+          "diagnostics_count": 1000,
+          "diagnostics_sha256": "6d73317e12c49de9c1f211405dd20d7d0d45d40ed177fb84d25ccc9fe8284a67",
+          "result_sha256": "28079089eefbbc24ac8c6480ea0ab007a0ee08bb6a5a4b511f89c9b91e1006a5"
+        }
+      }
+    ]
+  },
+  "native": {
+    "experiment": "ISOLATED prefix matching; NOT an Invariant app speedup or extension benchmark",
+    "mode": "executable",
+    "python": "3.14.5 (tags/v3.14.5:5607950, May 10 2026, 10:43:50) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "compiler_target": "mingw32",
+    "names": 20000,
+    "prefixes": 100,
+    "repeat": 7,
+    "parity": "all names and edge cases match",
+    "timing_scope": "Python dictionary is prebuilt; native kernel has prebuilt dictionary; full process includes native dictionary construction",
+    "timings": {
+      "python_naive": {
+        "median_ms": 99.5198,
+        "samples_ms": [
+          99.5198,
+          95.1275,
+          97.3434,
+          98.5425,
+          104.1399,
+          114.6489,
+          99.5449
+        ]
+      },
+      "python_ancestor_dictionary": {
+        "median_ms": 9.0929,
+        "samples_ms": [
+          8.7836,
+          8.6294,
+          8.8824,
+          9.5155,
+          9.0929,
+          11.9434,
+          11.8447
+        ]
+      },
+      "cpp_kernel_prepacked_no_output_conversion": {
+        "median_ms": 2.486,
+        "samples_ms": [
+          3.01,
+          1.112,
+          3.766,
+          1.75,
+          2.486,
+          3.724,
+          2.077
+        ]
+      },
+      "cpp_full_process_including_serialization_startup_io_json": {
+        "median_ms": 17.9447,
+        "samples_ms": [
+          15.8728,
+          17.446,
+          17.9447,
+          17.6606,
+          18.2059,
+          18.7786,
+          18.685
+        ]
+      }
+    }
+  }
+}

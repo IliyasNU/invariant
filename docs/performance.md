@@ -14,8 +14,9 @@ commands below before relying on them elsewhere.
 - Peak memory traced by `tracemalloc` is **unchanged** (within +6%). It is set
   by parsing and the syntax tree, not by diagnostic objects.
 - **C++ is not added.** After these changes, the only work a native kernel
-  could take over without rewriting the parser is prefix matching on names
-  already extracted from the AST. It is a small share of real analyses. On
+  evaluated in the native experiment is prefix matching on names already
+  extracted from the AST. It is a small share of the service-like synthetic
+  workloads measured here. On
   this machine a C++ kernel loses to Python once the data has to cross a
   process boundary, and an in-process build is not possible with the
   installed toolchain. The criteria for revisiting the decision are at the
@@ -47,15 +48,17 @@ No API, worker, configuration, result format or database schema changed.
 `scripts/benchmark_engine.py` generates five fixed workloads in memory (no
 randomness, network, database or filesystem input) and times
 `invariant.engine.analyze` alone with `time.perf_counter`. Workload creation,
-fingerprinting and JSON output happen outside the timed region. There is one
-warm-up and a `gc.collect()` before each sample. cProfile and tracemalloc run
+fingerprinting and JSON output happen outside the timed region. An initial
+fingerprint run is followed by one additional warm-up and a `gc.collect()`
+before each timed sample. cProfile and tracemalloc run
 as separate, additional runs, so they never affect the timings.
 
 Each case records a **fingerprint**: the result summary (without
 `engine_version`), the diagnostic count, and SHA-256 hashes of the diagnostic
 list and of the whole result. `--compare` fails with exit status 2 if any
 fingerprint or workload hash differs from the baseline artifact. A faster but
-different result is therefore never reported as a speedup. A case missing from
+different result is therefore never reported as a speedup (its ratio is null).
+A case missing from
 the baseline is listed under `uncompared`, and a comparison that matches no
 case fails.
 
@@ -167,13 +170,15 @@ measured bottleneck *after* facts have been extracted from the AST: given a
 list of dotted names and a rule's prefixes, return the first configured
 matching prefix for each name. Rewriting the parser, the AST traversal, the
 API or the worker in C++ was out of scope. The Python `ast` module would still
-build the tree, so moving traversal to native code would mean reimplementing
-Python parsing semantics.
+build the tree. C++ could traverse that existing Python AST via the CPython
+C API while holding the GIL; it would need to port Invariant's visitor and
+scope-resolution logic, not replace the parser. That alternative was not
+implemented or measured in this experiment.
 
 ### Experiment
 
-`native_prefix_probe.cpp` and `native_prefix_probe.py` (kept with the
-measurement artifacts, not in this repository) implement the same algorithm
+[`native_prefix_probe.cpp`](../benchmarks/native_prefix_probe.cpp) and
+[`native_prefix_probe.py`](../benchmarks/native_prefix_probe.py) implement the same algorithm
 as `PrefixMatcher` in both languages, a hash map of prefixes plus a walk over
 dotted ancestors, and also a naive linear scan for reference. Inputs are
 20 000 names and 100 prefixes, including overlapping prefixes, duplicates,
@@ -187,7 +192,7 @@ an i386 PE32 DLL and cannot be loaded (`OSError: [WinError 193]`). The probe
 was run as a standalone 32-bit executable instead:
 
 ```powershell
-.\.venv\Scripts\python.exe -I native_prefix_probe.py --mode executable --compile --repeat 7
+.\.venv\Scripts\python.exe -I benchmarks/native_prefix_probe.py --mode executable --compile --compiler g++ --repeat 7
 ```
 
 | Variant (20 000 names, 100 prefixes) | Median, ms |
@@ -205,21 +210,21 @@ This is an isolated microbenchmark, not an application measurement.
   samples vary between 1.1 and 3.8 ms.
 - Once the cost of getting data in and out is included, C++ is 2× *slower*
   than Python. An in-process extension would avoid starting a process. It
-  would still have to encode and pack every name and convert the results, an
-  O(n) step in Python that costs about as much per name as the dictionary
-  lookup it replaces. This could not be measured here, because no 64-bit
-  compiler is available.
+  would still have to transfer names and convert the results. Neither the
+  isolated packing cost nor an in-process extension was measured here,
+  because no 64-bit compiler is available. The subprocess result cannot
+  establish whether such an extension would be faster or slower.
 
-### Upper bound on application gain
+### Limits of the application estimate
 
-Prefix matching is at most 4% of `multi_rule_clean` and 11–15% of the
-call- and import-dense cases. Making it free would save at most that share.
-In the most favourable synthetic case, `import_heavy_capped` (0.18 s), about
-184 000 lookups at ~0.45 µs each come to roughly 0.08 s. A 3.7× faster kernel
-with no boundary cost would save about 0.06 s. Real boundary costs and the
-restructuring needed to batch names per file would cut into that. These are
-estimates derived from the measurements above, not measured application
-gains.
+Under cProfile, prefix matching accounts for about 4% of `multi_rule_clean`
+and 11–15% of the call- and import-dense cases, but 58% of
+`import_heavy_capped`. These instrumented shares identify candidates for
+further investigation; they are not wall-time speedup bounds. The isolated
+kernel's ratio also cannot be applied directly to application timing:
+batch construction, encoding, return conversion and changed allocation
+patterns all matter. Only an end-to-end run of a working in-process
+extension could establish its application gain.
 
 ### Decision
 
@@ -227,10 +232,12 @@ Do not add C++ or any native dependency. Reasons:
 
 1. The measured application bottleneck after 1.1.1 is AST traversal and call
    resolution in Python, which a post-extraction kernel does not touch.
-2. The part a kernel could take over is small in realistic workloads. The
+2. The part this kernel could take over is small in the service-like synthetic
+   workloads measured here; real repositories still need profiling. The
    only measured end-to-end native variant is slower than Python.
 3. A native extension would need 64-bit builds and wheels for each supported
-   platform and Python version, plus a pure-Python fallback, and it would make
+   platform/architecture, a deliberate CPython ABI strategy, a pure-Python
+   fallback and cross-platform verification; it would make
    the engine harder to review. For now, a 1.6–15× speedup came from pure
    Python changes.
 
@@ -251,7 +258,14 @@ that both give identical results.
 
 ## Reproducing
 
-Measurement artifacts for this page (`baseline-timing-final.json`,
+The portable [measurement evidence](../benchmarks/2026-11-09.json) records
+the historical timing samples, fingerprints and memory figures without local
+account paths. Probe sources are also versioned under `benchmarks/`, so a
+fresh clone can inspect or rerun the experiment. Binary artifacts are ignored.
+These numbers were recorded before the final duplicate-prefix and benchmark
+reporting fixes; later verification is recorded separately.
+
+Full local measurement artifacts for this page (`baseline-timing-final.json`,
 `baseline.json`, `baseline-dense.json`, `optimized-final.json`,
 `native-probe-executable.json`, cProfile files and the probe sources) were
 kept outside the repository, in `outputs/invariant-performance-20261109`. To
