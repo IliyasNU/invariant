@@ -19,7 +19,7 @@ from invariant.paths import (
     normalize_path,
 )
 from invariant.result import AnalysisResult, Diagnostic, FileCounts, Outcome
-from invariant.rules import CHECKERS, ParsedFile, rule_applies
+from invariant.rules import ParsedFile, prepare_checker, rule_applies
 
 UnreadableReason = Literal[
     "too_large",
@@ -113,10 +113,13 @@ def analyze(
     the others, so a caller that stores the result has a bounded amount to
     store whatever the files hold.
     """
+    if max_violations is not None and max_violations < 0:
+        raise ValueError("max_violations must be nonnegative")
     settings = settings or ProjectSettings()
     threshold = fail_on or settings.fail_on
     roots = SourceRoots(settings.source_roots)
     enabled = [rule for rule in rules if rule.enabled]
+    prepared = [(rule, prepare_checker(rule)) for rule in enabled]
     diagnostics = list(errors)
     sources = list(sources)
     unreadable = list(unreadable)
@@ -172,17 +175,15 @@ def analyze(
             diagnostics.append(parsed)
             continue
         analyzed += 1
-        for rule in enabled:
+        for rule, check in prepared:
             if rule_applies(rule, location.module, path):
                 evaluations += 1
-                found = CHECKERS[rule.rule_type](rule, parsed)
-                if max_violations is not None and listed + len(found) > max_violations:
-                    room = max(0, max_violations - listed)
-                    for item in found[room:]:
-                        omitted[item.severity] += 1
-                    found = found[:room]
-                listed += len(found)
-                diagnostics.extend(found)
+                room = None if max_violations is None else max_violations - listed
+                found = check(parsed, room)
+                count = len(found.diagnostics)
+                omitted[rule.severity] += found.total - count
+                listed += count
+                diagnostics.extend(found.diagnostics)
 
     diagnostics.sort(key=Diagnostic.sort_key)
     blocking = omitted["error"] + (omitted["warning"] if threshold == "warning" else 0)

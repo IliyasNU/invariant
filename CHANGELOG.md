@@ -4,6 +4,29 @@ All notable changes to Invariant. From 1.0.0 on, versions follow semantic
 versioning: a change that breaks the API, the command line, the configuration
 file or the result format comes only with a new major version.
 
+## 1.1.1 (2026-11-09)
+
+### Performance
+
+- Import rules share a single per-file AST import index, instead of walking
+  the entire syntax tree for each applicable rule.
+- Forbidden module/call prefixes are prepared once per rule per analysis;
+  matching keeps the first configured prefix and dotted-module boundaries.
+- After the diagnostic cap, the engine counts further violations without
+  constructing their diagnostic objects, messages or locations. Verdicts,
+  severity counts and the retained findings stay unchanged.
+- Added a reproducible engine benchmark with separate CPU/memory profiles
+  and result fingerprints to verify performance comparisons preserve behavior.
+
+### Changed
+
+- `invariant.engine.analyze` rejects a negative `max_violations` with
+  `ValueError`; 1.1.0 treated it as 0. The API, worker and command line never
+  pass a negative limit.
+
+No schema migration or additional runtime dependency is required. See
+[performance measurements and the C++ assessment](docs/performance.md).
+
 ## 1.1.0 (2026-11-05)
 
 ### Added
