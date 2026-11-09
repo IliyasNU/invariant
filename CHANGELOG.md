@@ -17,6 +17,12 @@ file or the result format comes only with a new major version.
   severity counts and the retained findings stay unchanged.
 - Added a reproducible engine benchmark with separate CPU/memory profiles
   and result fingerprints to verify performance comparisons preserve behavior.
+- Benchmark comparisons omit speedup ratios when workloads or results differ.
+- Prefix matching remains correct if in-place configuration changes introduce
+  duplicate prefixes after validation.
+- Retry-scheduling tests also handle PostgreSQL sessions using non-UTC timezones.
+- Setup examples and generated configuration links target the release branch
+  while `main` still contains the older prototype.
 
 ### Changed
 

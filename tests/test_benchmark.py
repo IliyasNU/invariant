@@ -97,3 +97,24 @@ def test_benchmark_artifact_and_separate_process_parity(tmp_path):
     )
     assert mismatch.returncode == 2
     assert json.loads(mismatch.stdout)["comparison"]["parity"] is False
+    assert (
+        json.loads(mismatch.stdout)["comparison"]["cases"][0]["median_speedup"] is None
+    )
+
+    # Even identical results cannot justify a speedup for a changed workload.
+    first["cases"][0]["result"]["summary"]["outcome"] = "pass"
+    first["cases"][0]["workload_sha256"] = "different-workload"
+    artifact.write_text(json.dumps(first), encoding="utf-8")
+    changed_workload = subprocess.run(
+        [*command, "--compare", str(artifact)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    assert changed_workload.returncode == 2
+    assert (
+        json.loads(changed_workload.stdout)["comparison"]["cases"][0]["median_speedup"]
+        is None
+    )

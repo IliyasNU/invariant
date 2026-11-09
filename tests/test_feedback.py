@@ -221,7 +221,10 @@ def test_publishing_is_retried_on_its_own_and_never_changes_the_run(client):
         "pending",
         "github_rate_limited",
     )
-    wait = waiting.feedback_next_attempt_at.replace(tzinfo=UTC) - datetime.now(UTC)
+    retry_at = waiting.feedback_next_attempt_at
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    wait = retry_at - datetime.now(UTC)
     assert wait.total_seconds() > 100  # GitHub asked for two minutes
 
     feedback = client.get(f"/analysis-runs/{run_id}").json()["feedback"]

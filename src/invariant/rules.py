@@ -114,7 +114,11 @@ class PrefixMatcher:
     """
 
     def __init__(self, prefixes: list[str]) -> None:
-        self.positions = {prefix: index for index, prefix in enumerate(prefixes)}
+        self.positions: dict[str, int] = {}
+        for prefix in prefixes:
+            # Models are mutable after validation; retain first-match semantics
+            # even if a caller introduces duplicates between analyses.
+            self.positions.setdefault(prefix, len(self.positions))
 
     def __call__(self, imported: str) -> str | None:
         candidate = imported

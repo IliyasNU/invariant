@@ -450,7 +450,9 @@ def main(argv: list[str] | None = None) -> int:
                     "name": current["name"],
                     "parity": matched,
                     "median_speedup": old["timing_seconds"]["median"]
-                    / current["timing_seconds"]["median"],
+                    / current["timing_seconds"]["median"]
+                    if matched
+                    else None,
                 }
             )
         # Comparing nothing proves nothing.

@@ -202,3 +202,12 @@ def test_from_module_match_still_suppresses_alias_duplicates_and_unresolved_rela
 def test_a_negative_diagnostic_limit_is_rejected():
     with pytest.raises(ValueError, match="max_violations must be nonnegative"):
         analyze([], [], max_violations=-1)
+
+
+def test_prefix_mutation_cannot_hide_a_later_match():
+    rule = import_rule(forbidden_imports=["os", "sys", "json"])
+    rule.forbidden_imports[1] = "os"
+    result = analyze([Source("a.py", "import json\n")], [rule])
+    [item] = result.violations
+    assert item.data["forbidden"] == "json"
+    assert result.outcome is Outcome.FAIL

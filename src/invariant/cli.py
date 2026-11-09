@@ -41,7 +41,9 @@ EXIT_OK = 0
 EXIT_VIOLATIONS = 1
 EXIT_ERROR = 2
 
-DOCS = "https://github.com/IliyasNU/invariant/blob/main/docs/configuration.md"
+DOCS = (
+    "https://github.com/IliyasNU/invariant/blob/codex/v1.1-fixes/docs/configuration.md"
+)
 
 STARTER = """\
 # Invariant: architecture rules for this project. All fields are explained in

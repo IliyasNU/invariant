@@ -108,7 +108,11 @@ def test_a_transient_error_is_retried_after_a_backoff():
     waiting = load(run_id)
     assert (waiting.status, waiting.attempts, waiting.outcome) == ("queued", 1, None)
     assert (waiting.error_code, waiting.locked_by) == ("github_rate_limited", None)
-    wait = waiting.next_attempt_at.replace(tzinfo=UTC) - before
+    retry_at = waiting.next_attempt_at
+    # SQLite loses timezone information; PostgreSQL may return a non-UTC zone.
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    wait = retry_at - before
     assert timedelta(seconds=29) < wait < timedelta(seconds=35)
     # Not due yet: an idle worker leaves it alone.
     assert work(github) == 0
@@ -154,7 +158,10 @@ def test_an_excessive_retry_after_is_capped_without_stopping_the_worker(retry_af
 
     waiting = load(run_id)
     assert (waiting.status, waiting.locked_by) == ("queued", None)
-    wait = waiting.next_attempt_at.replace(tzinfo=UTC) - before
+    retry_at = waiting.next_attempt_at
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    wait = retry_at - before
     assert timedelta(minutes=4, seconds=59) < wait < timedelta(minutes=5, seconds=5)
 
 
