@@ -4,6 +4,32 @@ All notable changes to Invariant. From 1.0.0 on, versions follow semantic
 versioning: a change that breaks the API, the command line, the configuration
 file or the result format comes only with a new major version.
 
+## 1.2.0 (2026-11-10)
+
+### Added
+
+- `GET /analysis-runs/{id}/sarif` downloads completed runs as SARIF 2.1.0,
+  using the original configuration snapshot and engine version. Rules can be
+  edited or deleted without changing historical exports. It requires the API key.
+- Capped SARIF reports include full summary counts, omitted counts and an
+  explicit truncation warning. Analysis failures remain invocation errors;
+  report truncation alone does not imply that analysis failed.
+
+### Fixed
+
+- Webhook HMAC verification uses the receiving application's settings instead
+  of re-reading the process environment. Separate app instances keep separate
+  secrets; changing the environment after startup does not rotate a running app.
+- Invalid upstream Content-Length headers, huge lengths, deeply nested JSON
+  and malformed changed-file statuses produce structured GitHub errors instead
+  of unexpected worker failures. Stream buffers reject oversize chunks before
+  copying them.
+
+Unfinished/failed runs return `409 analysis_not_completed` for SARIF export;
+legacy runs without supported snapshots return `409 sarif_unavailable` and
+remain readable through the existing JSON history API. No database migration
+or new runtime dependency is required.
+
 ## 1.1.1 (2026-11-09)
 
 ### Performance

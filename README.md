@@ -7,7 +7,7 @@ Invariant returns deterministic, machine-readable violations and keeps an audit
 history of every completed analysis. The `invariant` command runs the same
 checks offline, on a developer machine or in CI.
 
-Version 1.1 checks Python code with four deterministic rule types, for
+Version 1.2 checks Python code with four deterministic rule types, for
 forbidden imports, forbidden calls, relative imports and file length, read
 with the standard-library AST and never run. It does **not** claim semantic
 or AI-based architecture understanding, and the human developer remains the
@@ -720,6 +720,34 @@ prints, with a `source` (where the files came from, with commits) and a `run`
 (status, error, timing, configuration hash) section. A client can read it
 without knowing the rest of the API.
 
+### Download SARIF from a recorded run
+
+```bash
+curl -H "$AUTH" http://127.0.0.1:8000/analysis-runs/42/sarif -o results.sarif
+```
+
+`GET /analysis-runs/{id}/sarif` returns SARIF 2.1.0 with media type
+`application/sarif+json` and a download filename. It uses the run's original
+configuration, diagnostics and engine version; it never downloads source or
+re-runs an analysis. Editing or deleting current rules does not rewrite the
+export. As with the rest of the history API, the operator's API key is required.
+
+The report has the same rule IDs, locations and diagnostic format as
+`invariant check --format sarif`. Its properties also identify the recorded
+run, project, configuration hash and GitHub commits when available. Source
+code is never included.
+
+For capped runs, `properties.summary` retains the full counts and
+`properties.omitted_violations` records how many errors/warnings are omitted.
+`properties.diagnostics_truncated` and a warning notification make the partial
+listing explicit. A syntax/read error makes `executionSuccessful` false;
+truncation of the report alone does not change the analysis outcome.
+
+Queued, running and failed runs return `409 analysis_not_completed`. Historical
+runs without a supported configuration snapshot or complete counters return
+`409 sarif_unavailable`; their existing JSON detail/result endpoints still
+work. Missing runs return 404.
+
 ### Errors
 
 Every error has the same shape, whatever its status:
@@ -774,6 +802,10 @@ Invariant validates `X-Hub-Signature-256` with HMAC-SHA256 and constant-time
 comparison before parsing or acting on the payload. It analyzes pull request
 actions `opened`, `synchronize`, and `reopened`; other events/actions return a
 clean `202 ignored` response.
+
+The secret is loaded with the application's settings at startup. Restart the
+API with a new secret to rotate it; changing the environment of a running
+process does not replace its configured secret.
 
 A pull request event is queued for the worker and returns `202` with
 `{"status": "queued", "analysis_run_id": ...}` only once the queued run is

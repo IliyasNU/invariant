@@ -116,6 +116,11 @@ Unicode code-point columns. Violations are SARIF results; unreadable files,
 syntax errors and other analysis failures are invocation notifications with
 `executionSuccessful: false`, even if a blocking violation gives an overall
 `fail` outcome. The command's exit code stays the same for every format.
+Reports also include full diagnostic summary counts. The service can export
+a completed historical run in this format through
+`GET /analysis-runs/{id}/sarif`, with its original rules and engine version.
+Unlike unlimited CLI reports, stored API runs may have a capped listing;
+their exports include omitted counts and an explicit warning.
 
 ```bash
 invariant check . --format sarif > results.sarif
