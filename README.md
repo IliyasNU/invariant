@@ -7,6 +7,10 @@ Invariant returns deterministic, machine-readable violations and keeps an audit
 history of every completed analysis. The `invariant` command runs the same
 checks offline, on a developer machine or in CI.
 
+Русскоязычное [полное руководство для новичка и работодателя](docs/guide-ru.md):
+назначение проекта, стек, архитектура, пошаговый запуск в PowerShell, API-примеры
+и честное описание возможностей и ограничений версии 1.2.0.
+
 Version 1.2 checks Python code with four deterministic rule types, for
 forbidden imports, forbidden calls, relative imports and file length, read
 with the standard-library AST and never run. It does **not** claim semantic
