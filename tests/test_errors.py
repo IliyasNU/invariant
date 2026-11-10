@@ -14,7 +14,9 @@ def create_project(client, name="Payments"):
 
 
 def test_every_error_has_one_format_with_the_request_id(client, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", "webhook-secret"
+    )
     create_project(client)
     responses = {
         "project_not_found": client.get("/projects/999"),

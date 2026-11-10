@@ -322,7 +322,9 @@ def test_github_pr_without_python_files_is_not_applicable(client, github):
 
 
 def test_webhook_records_a_not_applicable_pull_request(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     create_github_project(client)
     github.comment_enabled = True
     github.files = []
@@ -341,7 +343,9 @@ def test_webhook_records_a_not_applicable_pull_request(client, github, monkeypat
 def test_webhook_records_an_incomplete_analysis_without_a_verdict(
     client, github, monkeypatch
 ):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     create_github_project(client)
     github.comment_enabled = True
     github.skipped = [SkippedFile("app/domain/big.py", "too_large")]
@@ -376,7 +380,9 @@ def valid_event(**changes) -> dict:
 def test_webhook_rejects_malformed_signed_payloads(
     client, github, monkeypatch, payload
 ):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     project = create_github_project(client)
     body = json.dumps(payload).encode()
 
@@ -391,7 +397,9 @@ def test_webhook_rejects_malformed_signed_payloads(
 
 
 def test_webhook_rejects_deeply_nested_json(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     body = b"[" * 100_000 + b"]" * 100_000
 
     response = client.post(
@@ -403,7 +411,9 @@ def test_webhook_rejects_deeply_nested_json(client, github, monkeypatch):
 
 
 def test_webhook_checks_signature_before_payload_types(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     headers = signed_headers(b"{}")
     body = json.dumps({"action": []}).encode()
 
@@ -423,7 +433,9 @@ def test_excluded_changes_are_not_applicable_rather_than_a_pass(
     github.comment_enabled = True
 
     manual = analyze(client, github, project["id"])
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     webhook = deliver(client, github, json.dumps(pull_request_payload()).encode())
 
     assert (manual["outcome"], manual["passed"]) == ("not_applicable", None)
@@ -488,7 +500,9 @@ def test_webhook_signature_rejects_malformed_header_without_raising(signature):
 
 
 def test_webhook_rejects_non_ascii_signature(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
 
     response = client.post(
         "/integrations/github/webhook",
@@ -502,7 +516,9 @@ def test_webhook_rejects_non_ascii_signature(client, github, monkeypatch):
 
 
 def test_webhook_rejects_invalid_signature(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
 
     response = client.post(
         "/integrations/github/webhook",
@@ -518,7 +534,7 @@ def test_webhook_rejects_invalid_signature(client, github, monkeypatch):
 
 
 def test_webhook_requires_configured_secret(client, github, monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setattr(client.app.state.settings, "github_webhook_secret", None)
 
     response = client.post(
         "/integrations/github/webhook",
@@ -531,7 +547,9 @@ def test_webhook_requires_configured_secret(client, github, monkeypatch):
 
 
 def test_webhook_ignores_irrelevant_event(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     body = b"{}"
     headers = signed_headers(body)
     headers["X-GitHub-Event"] = "push"
@@ -546,7 +564,9 @@ def test_webhook_ignores_irrelevant_event(client, github, monkeypatch):
 
 
 def test_webhook_ignores_irrelevant_pull_request_action(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     body = json.dumps(pull_request_payload("closed")).encode()
 
     response = client.post(
@@ -559,7 +579,9 @@ def test_webhook_ignores_irrelevant_pull_request_action(client, github, monkeypa
 
 
 def test_webhook_queues_and_deduplicates_delivery(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     project = create_github_project(client)
     create_rule(client, project["id"])
     body = json.dumps(pull_request_payload()).encode()
@@ -589,7 +611,9 @@ def test_webhook_queues_and_deduplicates_delivery(client, github, monkeypatch):
 
 
 def test_github_runs_record_what_they_checked(client, github, monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", WEBHOOK_SECRET
+    )
     project = create_github_project(client)
     create_rule(client, project["id"])
     github.base_sha = "b" * 40

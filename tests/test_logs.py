@@ -159,7 +159,9 @@ class OneFileGitHub:
 def test_a_run_can_be_followed_from_the_delivery_to_its_comment(
     client, monkeypatch, caplog
 ):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
+    monkeypatch.setattr(
+        client.app.state.settings, "github_webhook_secret", "webhook-secret"
+    )
     project = client.post(
         "/projects", json={"name": "Shop", "github_owner": "o", "github_repo": "r"}
     ).json()

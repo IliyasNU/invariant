@@ -109,7 +109,7 @@ def test_a_missing_or_wrong_key_is_refused(headers, params, message):
 
 
 def test_the_open_routes_need_no_key(monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
+    monkeypatch.setattr(app.state.settings, "github_webhook_secret", "webhook-secret")
     with TestClient(app) as anonymous:
         assert anonymous.get("/health").status_code == 200
         assert anonymous.get("/db-health").status_code == 200

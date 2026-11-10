@@ -117,6 +117,124 @@ def test_an_oversized_api_response_is_refused():
     assert not error.value.transient
 
 
+@pytest.mark.parametrize(
+    "declared",
+    [b"\xb2", "not-a-number", "-1", "+10", "1.2", "5, 5", ""],
+)
+def test_a_malformed_content_length_is_refused_before_reading_the_body(declared):
+    body = Stream(100)
+
+    def handler(_request):
+        return httpx.Response(200, content=body, headers={"Content-Length": declared})
+
+    with client(handler) as github, pytest.raises(GitHubAPIError) as error:
+        github.get_pull_request("o", "r", 7)
+
+    assert (error.value.status_code, error.value.code) == (
+        502,
+        "github_invalid_response",
+    )
+    assert error.value.message == "GitHub returned an invalid Content-Length header"
+    assert not error.value.transient
+    assert body.served == 0
+
+
+def test_a_very_long_content_length_is_oversized_without_integer_conversion():
+    body = Stream(100)
+
+    def handler(_request):
+        return httpx.Response(
+            200, content=body, headers={"Content-Length": "9" * 10_000}
+        )
+
+    with client(handler) as github, pytest.raises(GitHubAPIError) as error:
+        github.get_pull_request("o", "r", 7)
+
+    assert (error.value.status_code, error.value.code) == (
+        502,
+        "github_invalid_response",
+    )
+    assert error.value.message == "GitHub returned a response over the size limit"
+    assert body.served == 0
+
+
+def test_a_content_length_with_many_leading_zeroes_is_still_valid():
+    body = json.dumps({"number": 7, "head": {"sha": HEAD}}).encode()
+
+    def handler(_request):
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"Content-Length": "0" * 10_000 + str(len(body))},
+        )
+
+    with client(handler) as github:
+        assert github.get_pull_request("o", "r", 7).head_sha == HEAD
+
+
+def test_an_understated_content_length_cannot_bypass_the_streaming_limit():
+    body = Stream(20 * MAX_FILE_BYTES)
+
+    def handler(_request):
+        return httpx.Response(200, content=body, headers={"Content-Length": "1"})
+
+    with client(handler) as github:
+        assert github.get_file_bytes("o", "r", "app/big.py", HEAD) is None
+
+    assert MAX_FILE_BYTES < body.served <= MAX_FILE_BYTES + 65_536
+
+
+def test_deeply_nested_upstream_json_is_a_structured_invalid_response():
+    # Python 3.14's C decoder accepts much deeper nesting than the Python
+    # recursion limit; exceed its own stack guard while staying under 1 MB.
+    body = b"[" * 100_000 + b"0" + b"]" * 100_000
+
+    with (
+        client(lambda _request: httpx.Response(200, content=body)) as github,
+        pytest.raises(GitHubAPIError) as error,
+    ):
+        github.get_pull_request("o", "r", 7)
+
+    assert (error.value.status_code, error.value.code) == (
+        502,
+        "github_invalid_response",
+    )
+    assert error.value.message == "GitHub returned an invalid response"
+    assert not error.value.transient
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"status": []},
+        {"status": {}},
+        {"status": None},
+        {"status": 7},
+        {"status": True},
+        {"status": ""},
+    ],
+)
+def test_a_malformed_changed_file_status_is_refused_before_fetching_files(fields):
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json=[{"filename": "app/a.py", **fields}])
+
+    with client(handler) as github, pytest.raises(GitHubAPIError) as error:
+        github.get_changed_python_files(
+            "o", "r", PullRequestMetadata(number=7, head_sha=HEAD)
+        )
+
+    assert (error.value.status_code, error.value.code) == (
+        502,
+        "github_invalid_response",
+    )
+    assert error.value.message == "GitHub changed-files response was invalid"
+    assert requests == ["/repos/o/r/pulls/7/files"]
+
+
 def test_a_pull_request_that_moves_while_listed_is_retried_not_mixed():
     downloaded = []
 

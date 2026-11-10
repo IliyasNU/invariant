@@ -139,14 +139,29 @@ class GitHubClient:
         try:
             with self._client.stream(method, path, **kwargs) as response:
                 _check_status(response)
-                declared = response.headers.get("Content-Length", "")
-                if declared.isdigit() and int(declared) > limit:
-                    return None
+                declared = response.headers.get("Content-Length")
+                if declared is not None:
+                    declared = declared.strip(" \t")
+                    if re.fullmatch(r"[0-9]+", declared) is None:
+                        raise GitHubAPIError(
+                            status_code=502,
+                            code="github_invalid_response",
+                            message="GitHub returned an invalid Content-Length header",
+                        )
+                    # Compare decimal strings rather than converting untrusted
+                    # input to int: even a valid header can have thousands of
+                    # digits, exceeding Python's integer conversion limit.
+                    length = declared.lstrip("0") or "0"
+                    maximum = str(limit)
+                    if len(length) > len(maximum) or (
+                        len(length) == len(maximum) and length > maximum
+                    ):
+                        return None
                 body = bytearray()
                 for chunk in response.iter_bytes():
-                    body += chunk
-                    if len(body) > limit:
+                    if len(chunk) > limit - len(body):
                         return None
+                    body += chunk
                 return bytes(body)
         except httpx.RequestError as exc:
             raise GitHubAPIError(
@@ -166,7 +181,7 @@ class GitHubClient:
             )
         try:
             return json.loads(body)
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise GitHubAPIError(
                 status_code=502,
                 code="github_invalid_response",
@@ -228,7 +243,10 @@ class GitHubClient:
             )
             # A malformed entry could hide a Python file, so it fails the request.
             if not isinstance(payload, list) or not all(
-                isinstance(item, dict) and isinstance(item.get("filename"), str)
+                isinstance(item, dict)
+                and isinstance(item.get("filename"), str)
+                and isinstance(item.get("status"), str)
+                and bool(item["status"])
                 for item in payload
             ):
                 raise GitHubAPIError(

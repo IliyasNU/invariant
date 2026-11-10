@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 
 from app.analysis_service import enqueue_github_analysis
 from app.api import ID
-from app.config import Settings
 from app.database import get_db
 from app.errors import APIError
 from app.github import verify_webhook_signature
@@ -71,13 +70,14 @@ def analyze_github_project(
     responses={200: {"model": WebhookResponse, "description": "A repeated delivery"}},
 )
 def github_webhook(
+    request: Request,
     body: RawBody,
     db: DatabaseSession,
     github_event: Annotated[str | None, Header(alias="X-GitHub-Event")] = None,
     github_delivery: Annotated[str | None, Header(alias="X-GitHub-Delivery")] = None,
     github_signature: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
 ) -> WebhookResponse | JSONResponse:
-    settings = Settings()
+    settings = request.app.state.settings
     if not settings.github_webhook_secret:
         raise APIError(
             503,
