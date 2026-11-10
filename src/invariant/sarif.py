@@ -39,6 +39,7 @@ def to_sarif(
     rules: Sequence[RuleConfig],
     *,
     source: dict[str, Any] | None = None,
+    engine_version: str | None = None,
 ) -> dict[str, Any]:
     """A portable report with violations as results and errors as notifications.
 
@@ -46,6 +47,8 @@ def to_sarif(
     Rule keys are the stable SARIF rule IDs; disabled and unmatched rules stay
     in the metadata as well. Input errors make the invocation unsuccessful,
     even when a blocking violation makes the engine outcome ``fail``.
+    A capped result retains full severity totals and explicitly announces the
+    omitted violations. Stored runs can supply their producing engine version.
     """
     ordered = sorted(rules, key=lambda rule: rule.key)
     indices = {rule.key: index for index, rule in enumerate(ordered)}
@@ -72,24 +75,49 @@ def to_sarif(
         results.append(finding)
 
     invocation: dict[str, Any] = {"executionSuccessful": not result.errors}
-    if result.errors:
-        notifications = []
-        for item in result.errors:
-            notification: dict[str, Any] = {
-                "level": "error",
-                "message": {"text": item.message},
-                "properties": {"code": item.code, "path": item.path, **item.data},
-            }
-            if locations := _locations(item):
-                notification["locations"] = locations
-            notifications.append(notification)
-        invocation["toolExecutionNotifications"] = notifications
+    notifications = []
+    for item in result.errors:
+        notification: dict[str, Any] = {
+            "level": "error",
+            "message": {"text": item.message},
+            "properties": {"code": item.code, "path": item.path, **item.data},
+        }
+        if locations := _locations(item):
+            notification["locations"] = locations
+        notifications.append(notification)
 
     properties: dict[str, Any] = {
         "outcome": result.outcome.value,
         "fail_on": result.fail_on,
         "files": asdict(result.files),
+        "summary": {
+            "errors": result.error_count,
+            "warnings": result.warning_count,
+            "analysis_errors": len(result.errors),
+        },
     }
+    omitted = result.omitted_errors + result.omitted_warnings
+    if omitted:
+        properties["omitted_violations"] = {
+            "errors": result.omitted_errors,
+            "warnings": result.omitted_warnings,
+        }
+        properties["diagnostics_truncated"] = True
+        notifications.append(
+            {
+                "level": "warning",
+                "message": {
+                    "text": (
+                        f"The report omits {omitted} architecture violation(s) "
+                        "because the diagnostic limit was reached; summary "
+                        "totals include the omitted violations."
+                    )
+                },
+                "properties": {"code": "diagnostics_truncated"},
+            }
+        )
+    if notifications:
+        invocation["toolExecutionNotifications"] = notifications
     if source is not None:
         properties["source"] = source
     return {
@@ -100,7 +128,9 @@ def to_sarif(
                 "tool": {
                     "driver": {
                         "name": "Invariant",
-                        "version": __version__,
+                        "version": __version__
+                        if engine_version is None
+                        else engine_version,
                         "informationUri": "https://github.com/IliyasNU/invariant",
                         "rules": descriptors,
                     }

@@ -52,6 +52,13 @@ def test_sarif_uses_stable_rule_ids_metadata_and_unicode_locations():
         }
     ]
     assert run["properties"]["outcome"] == "pass"
+    assert run["properties"]["summary"] == {
+        "errors": 0,
+        "warnings": 1,
+        "analysis_errors": 0,
+    }
+    assert "omitted_violations" not in run["properties"]
+    assert "diagnostics_truncated" not in run["properties"]
     assert run["invocations"] == [{"executionSuccessful": True}]
 
 
@@ -124,3 +131,86 @@ def test_sarif_not_applicable_preserves_no_verdict_and_disabled_metadata():
     assert run["properties"]["outcome"] == "not_applicable"
     assert run["results"] == []
     assert run["tool"]["driver"]["rules"][0]["defaultConfiguration"]["enabled"] is False
+
+
+def test_sarif_preserves_the_engine_version_that_produced_a_stored_run():
+    result = analyze([Source("code.py", "import os\n")], [import_rule()])
+
+    [run] = to_sarif(result, [import_rule()], engine_version="1.0.0+stored")["runs"]
+
+    assert run["tool"]["driver"]["version"] == "1.0.0+stored"
+    assert run["properties"]["summary"] == {
+        "errors": 1,
+        "warnings": 0,
+        "analysis_errors": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("severity", "outcome", "totals"),
+    [
+        ("error", "fail", {"errors": 2, "warnings": 0}),
+        ("warning", "pass", {"errors": 0, "warnings": 2}),
+    ],
+)
+def test_sarif_cap_zero_keeps_verdict_and_full_totals_with_a_truncation_notice(
+    severity, outcome, totals
+):
+    rules = [import_rule(severity=severity)]
+    result = analyze(
+        [Source("code.py", "import os\nimport os.path\n")],
+        rules,
+        max_violations=0,
+    )
+
+    [run] = to_sarif(result, rules)["runs"]
+
+    assert run["results"] == []
+    assert run["properties"]["outcome"] == outcome
+    assert run["properties"]["summary"] == {**totals, "analysis_errors": 0}
+    assert run["properties"]["omitted_violations"] == totals
+    assert run["properties"]["diagnostics_truncated"] is True
+    [invocation] = run["invocations"]
+    assert invocation["executionSuccessful"] is True
+    [notice] = invocation["toolExecutionNotifications"]
+    assert notice["level"] == "warning"
+    assert notice["properties"]["code"] == "diagnostics_truncated"
+    assert "omits 2 architecture violation(s)" in notice["message"]["text"]
+
+
+def test_sarif_analysis_errors_and_truncation_notices_are_both_preserved():
+    rules = [
+        import_rule(),
+        MaxFileLinesRule(
+            key="size", rule_type="max_file_lines", max_lines=1, severity="warning"
+        ),
+    ]
+    result = analyze(
+        [
+            Source("bad.py", "def bad(:\n"),
+            Source("code.py", "import os\nimport os.path\n"),
+        ],
+        rules,
+        max_violations=1,
+    )
+
+    [run] = to_sarif(result, rules)["runs"]
+
+    assert len(run["results"]) == 1
+    assert run["properties"]["outcome"] == "fail"
+    assert run["properties"]["summary"] == {
+        "errors": 2,
+        "warnings": 1,
+        "analysis_errors": 1,
+    }
+    assert run["properties"]["omitted_violations"] == {"errors": 1, "warnings": 1}
+    [invocation] = run["invocations"]
+    assert invocation["executionSuccessful"] is False
+    assert [
+        notice["properties"]["code"]
+        for notice in invocation["toolExecutionNotifications"]
+    ] == ["syntax_error", "diagnostics_truncated"]
+    assert [notice["level"] for notice in invocation["toolExecutionNotifications"]] == [
+        "error",
+        "warning",
+    ]

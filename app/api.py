@@ -3,6 +3,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +14,7 @@ from app.analysis_service import load_analysis_run, persist_analysis, result_doc
 from app.config_service import SOURCE, apply_import, export_config, plan_import
 from app.database import get_db
 from app.errors import APIError
+from app.exports import sarif_document
 from app.limits import rate_limited
 from app.models import AnalysisRun, AnalysisViolation, Project, Rule
 from app.schemas import (
@@ -23,6 +25,7 @@ from app.schemas import (
     AnalysisRunSummaryResponse,
     ConfigImportPlan,
     ConfigImportRequest,
+    ErrorResponse,
     PersistedViolationResponse,
     ProjectCreate,
     ProjectResponse,
@@ -495,6 +498,32 @@ def get_analysis_result(analysis_run_id: ID, db: DatabaseSession) -> dict[str, A
     Source code is never stored, so it is not part of the result.
     """
     return result_document(_run_or_404(analysis_run_id, db))
+
+
+class SARIFResponse(JSONResponse):
+    media_type = "application/sarif+json"
+
+
+@router.get(
+    "/analysis-runs/{analysis_run_id}/sarif",
+    response_class=SARIFResponse,
+    response_model=dict[str, Any],
+    responses={409: {"model": ErrorResponse, "description": "Run is not exportable"}},
+    summary="Download a completed run as SARIF 2.1.0",
+)
+def get_analysis_sarif(analysis_run_id: ID, db: DatabaseSession) -> SARIFResponse:
+    """Use the recorded rules and producer version; never re-run the analysis.
+
+    A capped run includes full counts and an explicit truncation warning.
+    Unfinished/failed runs and legacy runs without snapshots return 409.
+    """
+    document = sarif_document(_run_or_404(analysis_run_id, db))
+    return SARIFResponse(
+        content=document,
+        headers={
+            "Content-Disposition": f'attachment; filename="invariant-run-{analysis_run_id}.sarif"'
+        },
+    )
 
 
 def _run_or_404(analysis_run_id: int, db: Session) -> AnalysisRun:
